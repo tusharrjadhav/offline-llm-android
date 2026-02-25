@@ -2,6 +2,17 @@
 
 Android app for running GGUF language models fully on-device using `llama.cpp` through a JNI bridge.
 
+## Architecture Overview
+
+![GGUF & On-Device AI Overview](docs/gguf-on-device-ai-overview.png)
+
+This visual summarizes the architecture implemented in this project:
+
+- GGUF format as the local model format (weights + metadata).
+- Android Kotlin UI/orchestrator connected to native C++ via JNI.
+- `llama.cpp` driving local token generation.
+- Optional web-search grounding on top of local inference.
+
 ## What this app does
 
 - Discovers compatible GGUF instruct/chat models.
@@ -151,4 +162,3 @@ Run with Tavily API key:
 ```bash
 ./gradlew assembleDebug -PtavilyApiKey=YOUR_KEY
 ```
-

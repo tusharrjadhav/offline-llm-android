@@ -116,6 +116,12 @@ This gives token-by-token streaming behavior in chat UI.
 
 This app is designed for GGUF quantized models to run on mobile CPU/RAM budgets.
 
+Important implementation detail:
+
+- Quantization is **not** sent as a separate runtime parameter to `llama.cpp`.
+- The selected quant is represented by the selected GGUF file itself (example: `...Q4_K_M.gguf`, `...Q8_0.gguf`).
+- `llama.cpp` reads quantization from GGUF metadata during model load.
+
 Current quantization handling:
 
 - Default quant preference: `Q4_K_M`
@@ -133,6 +139,30 @@ Why quantization matters:
 - Higher quant (Q5/Q6/Q8) -> better quality, slower and larger memory footprint.
 
 The app exposes quant choices per model and uses device heuristics (RAM/storage checks) before download/run.
+
+---
+
+## Runtime parameters sent to `llama.cpp`
+
+At runtime, this app sends **inference/session configuration**, not a standalone quant flag:
+
+- On model load:
+  - `modelPath`
+  - `contextLength`
+  - `threads`
+  - `gpuLayers`
+- On generation:
+  - `prompt`
+  - `temperature`
+  - `topP`
+  - `maxTokens`
+
+Code references:
+
+- Kotlin JNI bridge:
+  - `app/src/main/java/com/android/gguf_llama_jin/inference/LlmNativeBridgeImpl.kt`
+- Native JNI implementation:
+  - `app/src/main/cpp/gguf_jni.cpp`
 
 ---
 

@@ -1,10 +1,62 @@
-*.iml
-.gradle
-/local.properties
-.idea
-.DS_Store
-/build
+# built application files
+*.apk
+*.aab
+*.ap_
+output.json
+
+# files for the dex VM
+*.dex
+
+# Java class files
+*.class
+
+# generated files
+bin/
+gen/
+
 /captures
 .externalNativeBuild
 .cxx
+
+# Local configuration file (sdk path, etc)
 local.properties
+
+.DS_Store
+
+# IDE
+.idea
+*.iml
+.run
+.project
+.classpath
+.settings
+.settings/**/*
+target/
+out/
+org.eclipse.jdt.ui.prefs
+
+org.eclipse.jdt.core.prefs
+
+/apks/
+
+/project.properties
+
+# python
+__pycache__
+*.pyc
+
+# Build created files that should not be source controlled
+jac_store.dat
+prod-libs
+
+# Gradle
+build/
+build/**/*
+.gradle/
+.gradle/**/*
+
+# Layout Inspector captures
+captures/
+
+# Kotlin
+.kotlin/

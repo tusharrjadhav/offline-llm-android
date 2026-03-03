@@ -1,20 +1,24 @@
 package com.android.gguf_llama_jin.inference
 
 import com.android.gguf_llama_jin.core.AppLogger
-import kotlinx.coroutines.flow.Flow
 
 class InferenceSessionManager(
-    private val bridge: LlmNativeBridge
+    bridges: Set<LlmRuntimeBridge>
 ) {
+    private val bridgeByRuntime = bridges.associateBy { it.runtime }
+
     private var modelHandle: Long = 0L
     private var sessionHandle: Long = 0L
-    private var loadedModelPath: String? = null
+    private var currentModelRef: RuntimeModelRef? = null
+    private var activeBridge: LlmRuntimeBridge? = null
 
-    private fun loadAndStart(modelPath: String, systemPrompt: String?): Long {
+    private fun loadAndStart(modelRef: RuntimeModelRef, systemPrompt: String?): Long {
+        val bridge = bridgeByRuntime[modelRef.runtime] ?: return 0L
+        activeBridge = bridge
         val threads = maxOf(Runtime.getRuntime().availableProcessors() - 1, 1).coerceAtMost(6)
-        AppLogger.i("InferenceSessionManager.loadAndStart modelPath=$modelPath threads=$threads ctx=4096")
+        AppLogger.i("InferenceSessionManager.loadAndStart runtime=${modelRef.runtime} modelPath=${modelRef.path} threads=$threads ctx=4096")
         modelHandle = bridge.loadModel(
-            modelPath = modelPath,
+            modelRef = modelRef,
             contextLength = 4096,
             threads = threads,
             gpuLayers = 0
@@ -24,35 +28,36 @@ class InferenceSessionManager(
         sessionHandle = bridge.startSession(modelHandle, systemPrompt)
         AppLogger.i("InferenceSessionManager.sessionHandle=$sessionHandle")
         if (sessionHandle != 0L) {
-            loadedModelPath = modelPath
+            currentModelRef = modelRef
         }
         return sessionHandle
     }
 
-    fun ensureSession(modelPath: String, systemPrompt: String?): Long {
-        if (sessionHandle != 0L && modelHandle != 0L && loadedModelPath == modelPath) {
-            AppLogger.i("InferenceSessionManager.reuseSession sessionHandle=$sessionHandle modelPath=$modelPath")
+    fun ensureSession(modelRef: RuntimeModelRef, systemPrompt: String?): Long {
+        if (sessionHandle != 0L && modelHandle != 0L && currentModelRef == modelRef) {
+            AppLogger.i("InferenceSessionManager.reuseSession sessionHandle=$sessionHandle runtime=${modelRef.runtime}")
             return sessionHandle
         }
         unload()
-        return loadAndStart(modelPath, systemPrompt)
+        return loadAndStart(modelRef, systemPrompt)
     }
 
-    fun generate(prompt: String, params: SamplingParams): Flow<TokenChunk> {
-        return bridge.generate(sessionHandle, prompt, params)
-    }
+    fun generate(prompt: String, params: SamplingParams) =
+        activeBridge?.generate(sessionHandle, prompt, params)
+            ?: throw IllegalStateException("No active runtime bridge")
 
     fun stop() {
         AppLogger.i("InferenceSessionManager.stop sessionHandle=$sessionHandle")
-        if (sessionHandle != 0L) bridge.stop(sessionHandle)
+        if (sessionHandle != 0L) activeBridge?.stop(sessionHandle)
     }
 
     fun unload() {
         AppLogger.i("InferenceSessionManager.unload modelHandle=$modelHandle sessionHandle=$sessionHandle")
         stop()
-        if (modelHandle != 0L) bridge.unloadModel(modelHandle)
+        if (modelHandle != 0L) activeBridge?.unloadModel(modelHandle)
         sessionHandle = 0L
         modelHandle = 0L
-        loadedModelPath = null
+        currentModelRef = null
+        activeBridge = null
     }
 }

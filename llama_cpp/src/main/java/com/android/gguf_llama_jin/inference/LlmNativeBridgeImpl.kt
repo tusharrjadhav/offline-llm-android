@@ -1,13 +1,16 @@
 package com.android.gguf_llama_jin.inference
 
 import com.android.gguf_llama_jin.core.AppLogger
+import com.android.gguf_llama_jin.core.ModelRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 
-class LlmNativeBridgeImpl : LlmNativeBridge {
+class LlmNativeBridgeImpl : LlmRuntimeBridge {
+    override val runtime: ModelRuntime = ModelRuntime.LLAMA_CPP_GGUF
+
     private val nativeLoaded: Boolean = try {
         System.loadLibrary("gguf_jni")
         true
@@ -19,13 +22,13 @@ class LlmNativeBridgeImpl : LlmNativeBridge {
         AppLogger.i("LlmNativeBridgeImpl initialized. nativeLoaded=$nativeLoaded")
     }
 
-    override fun loadModel(modelPath: String, contextLength: Int, threads: Int, gpuLayers: Int): Long {
+    override fun loadModel(modelRef: RuntimeModelRef, contextLength: Int, threads: Int, gpuLayers: Int): Long {
         if (!nativeLoaded) {
             AppLogger.e("loadModel using fallback stub because native library is unavailable")
             return 1L
         }
-        val handle = nativeLoadModel(modelPath, contextLength, threads, gpuLayers)
-        AppLogger.i("nativeLoadModel complete. handle=$handle path=$modelPath ctx=$contextLength threads=$threads gpuLayers=$gpuLayers")
+        val handle = nativeLoadModel(modelRef.path, contextLength, threads, gpuLayers)
+        AppLogger.i("nativeLoadModel complete. handle=$handle path=${modelRef.path} ctx=$contextLength threads=$threads gpuLayers=$gpuLayers")
         return handle
     }
 

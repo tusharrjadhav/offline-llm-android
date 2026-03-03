@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "GGUF_llama_JIN"
-include(":app", ":ui", ":inference", ":llama_cpp")
+include(":app", ":ui", ":inference", ":llama_cpp", ":onnx_runtime")

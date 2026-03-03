@@ -9,6 +9,9 @@ import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.android.gguf_llama_jin.core.Constants
+import com.android.gguf_llama_jin.core.ModelRuntime
+import org.json.JSONArray
+import org.json.JSONObject
 
 class DownloadForegroundService : Service() {
     override fun onCreate() {
@@ -22,25 +25,12 @@ class DownloadForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val modelId = intent?.getStringExtra(EXTRA_MODEL_ID)
-        val quant = intent?.getStringExtra(EXTRA_QUANT)
-        val url = intent?.getStringExtra(EXTRA_URL)
-        val path = intent?.getStringExtra(EXTRA_PATH)
-        if (!modelId.isNullOrBlank() && !quant.isNullOrBlank() && !url.isNullOrBlank() && !path.isNullOrBlank()) {
-            DownloadCoordinator.enqueue(
-                this,
-                DownloadRequest(
-                    modelId = modelId,
-                    quant = quant,
-                    url = url,
-                    targetPath = path,
-                    expectedSha256 = intent.getStringExtra(EXTRA_SHA),
-                    expectedSizeBytes = intent.getLongExtra(EXTRA_SIZE, -1L).takeIf { it > 0 }
-                )
-            )
-            updateNotification("Downloading $modelId ($quant)")
+        val requestJson = intent?.getStringExtra(EXTRA_REQUEST_JSON)
+        if (!requestJson.isNullOrBlank()) {
+            val request = requestFromJson(requestJson)
+            DownloadCoordinator.enqueue(this, request)
+            updateNotification("Downloading ${request.modelId} (${request.variant})")
         }
-
         return START_STICKY
     }
 
@@ -70,22 +60,77 @@ class DownloadForegroundService : Service() {
         manager.notify(Constants.DOWNLOAD_NOTIFICATION_ID, baseNotification(content))
     }
 
+    private fun requestToJson(request: DownloadRequest): String {
+        val files = JSONArray()
+        request.files.forEach { file ->
+            files.put(
+                JSONObject()
+                    .put("fileName", file.fileName)
+                    .put("url", file.url)
+                    .put("targetPath", file.targetPath)
+                    .put("expectedSha256", file.expectedSha256)
+                    .put("expectedSizeBytes", file.expectedSizeBytes)
+            )
+        }
+        return JSONObject()
+            .put("modelId", request.modelId)
+            .put("runtime", request.runtime.name)
+            .put("variant", request.variant)
+            .put("files", files)
+            .toString()
+    }
+
+    private fun requestFromJson(json: String): DownloadRequest {
+        val obj = JSONObject(json)
+        val runtime = runCatching { ModelRuntime.valueOf(obj.optString("runtime")) }
+            .getOrDefault(ModelRuntime.LLAMA_CPP_GGUF)
+        val filesArr = obj.optJSONArray("files") ?: JSONArray()
+        val files = buildList {
+            for (i in 0 until filesArr.length()) {
+                val f = filesArr.optJSONObject(i) ?: continue
+                add(
+                    DownloadFile(
+                        fileName = f.optString("fileName"),
+                        url = f.optString("url"),
+                        targetPath = f.optString("targetPath"),
+                        expectedSha256 = if (f.has("expectedSha256") && !f.isNull("expectedSha256")) f.optString("expectedSha256") else null,
+                        expectedSizeBytes = if (f.has("expectedSizeBytes") && !f.isNull("expectedSizeBytes")) f.optLong("expectedSizeBytes") else null
+                    )
+                )
+            }
+        }
+        return DownloadRequest(
+            modelId = obj.optString("modelId"),
+            runtime = runtime,
+            variant = obj.optString("variant"),
+            files = files
+        )
+    }
+
     companion object {
-        const val EXTRA_MODEL_ID = "extra_model_id"
-        const val EXTRA_QUANT = "extra_quant"
-        const val EXTRA_URL = "extra_url"
-        const val EXTRA_PATH = "extra_path"
-        const val EXTRA_SHA = "extra_sha"
-        const val EXTRA_SIZE = "extra_size"
+        const val EXTRA_REQUEST_JSON = "extra_request_json"
 
         fun start(context: Context, request: DownloadRequest) {
+            val files = JSONArray()
+            request.files.forEach { file ->
+                files.put(
+                    JSONObject()
+                        .put("fileName", file.fileName)
+                        .put("url", file.url)
+                        .put("targetPath", file.targetPath)
+                        .put("expectedSha256", file.expectedSha256)
+                        .put("expectedSizeBytes", file.expectedSizeBytes)
+                )
+            }
+            val payload = JSONObject()
+                .put("modelId", request.modelId)
+                .put("runtime", request.runtime.name)
+                .put("variant", request.variant)
+                .put("files", files)
+                .toString()
+
             val intent = Intent(context, DownloadForegroundService::class.java)
-                .putExtra(EXTRA_MODEL_ID, request.modelId)
-                .putExtra(EXTRA_QUANT, request.quant)
-                .putExtra(EXTRA_URL, request.url)
-                .putExtra(EXTRA_PATH, request.targetPath)
-                .putExtra(EXTRA_SHA, request.expectedSha256)
-                .putExtra(EXTRA_SIZE, request.expectedSizeBytes ?: -1L)
+                .putExtra(EXTRA_REQUEST_JSON, payload)
 
             context.startForegroundService(intent)
         }

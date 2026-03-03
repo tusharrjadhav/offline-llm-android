@@ -3,6 +3,7 @@ package com.android.gguf_llama_jin.data.download
 import android.content.Context
 import com.android.gguf_llama_jin.core.AppLogger
 import com.android.gguf_llama_jin.core.Constants
+import com.android.gguf_llama_jin.core.ModelRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,10 +16,10 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
-import java.io.RandomAccessFile
 
 object DownloadCoordinator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -31,7 +32,16 @@ object DownloadCoordinator {
         val key = request.id()
         if (jobs.containsKey(key)) return
 
-        updateState(key, DownloadTaskState(request, DownloadState.QUEUED, 0L, request.expectedSizeBytes ?: -1L))
+        val totalExpected = request.files.sumOf { it.expectedSizeBytes ?: 0L }.takeIf { it > 0L } ?: -1L
+        updateState(
+            key,
+            DownloadTaskState(
+                request = request,
+                state = DownloadState.QUEUED,
+                downloadedBytes = 0L,
+                totalBytes = totalExpected
+            )
+        )
         persistQueue(context)
 
         jobs[key] = scope.launch {
@@ -42,10 +52,7 @@ object DownloadCoordinator {
     suspend fun pause(request: DownloadRequest) {
         val key = request.id()
         jobs.remove(key)?.cancelAndJoin()
-        val current = _states.value[key]
-        if (current != null) {
-            updateState(key, current.copy(state = DownloadState.PAUSED))
-        }
+        _states.value[key]?.let { updateState(key, it.copy(state = DownloadState.PAUSED)) }
     }
 
     fun resume(context: Context, request: DownloadRequest) {
@@ -55,36 +62,103 @@ object DownloadCoordinator {
     suspend fun cancel(request: DownloadRequest) {
         val key = request.id()
         jobs.remove(key)?.cancelAndJoin()
-        val current = _states.value[key]
-        if (current != null) {
-            val file = File(request.targetPath)
-            if (file.exists()) file.delete()
-            updateState(key, current.copy(state = DownloadState.CANCELED, error = null, downloadedBytes = 0L))
+        _states.value[key]?.let {
+            request.files.forEach { file ->
+                val f = File(file.targetPath)
+                if (f.exists()) f.delete()
+            }
+            updateState(key, it.copy(state = DownloadState.CANCELED, error = null, downloadedBytes = 0L))
         }
     }
 
     private suspend fun runDownload(context: Context, request: DownloadRequest) {
         val key = request.id()
-        val target = File(request.targetPath)
-        target.parentFile?.mkdirs()
-        var conn: HttpURLConnection? = null
-
         try {
-            val existingBytes = if (target.exists()) target.length() else 0L
+            var downloadedSoFar = 0L
+            var totalBytes = request.files.sumOf { it.expectedSizeBytes ?: 0L }.takeIf { it > 0L } ?: -1L
+
+            request.files.forEach { file ->
+                File(file.targetPath).parentFile?.mkdirs()
+                val existing = File(file.targetPath).takeIf { it.exists() }?.length() ?: 0L
+                downloadedSoFar += existing
+            }
+
             updateState(
                 key,
-                DownloadTaskState(
-                    request = request,
+                _states.value[key]!!.copy(
                     state = DownloadState.DOWNLOADING,
-                    downloadedBytes = existingBytes,
-                    totalBytes = request.expectedSizeBytes ?: -1L
+                    downloadedBytes = downloadedSoFar,
+                    totalBytes = totalBytes
                 )
             )
 
-            conn = URL(request.url).openConnection() as HttpURLConnection
-            if (existingBytes > 0) {
-                conn.setRequestProperty("Range", "bytes=$existingBytes-")
+            for (file in request.files) {
+                val before = File(file.targetPath).takeIf { it.exists() }?.length() ?: 0L
+                val downloadedForFile = downloadSingleFile(key, file, downloadedSoFar - before, totalBytes)
+                downloadedSoFar = downloadedForFile
+                if (_states.value[key]?.state == DownloadState.CANCELED) return
             }
+
+            updateState(key, _states.value[key]!!.copy(state = DownloadState.VERIFYING, activeFile = null))
+
+            val verifyFail = request.files.firstOrNull { file ->
+                val target = File(file.targetPath)
+                !FileVerifier.verifySize(target, file.expectedSizeBytes) || !FileVerifier.verifySha(target, file.expectedSha256)
+            }
+
+            if (verifyFail != null) {
+                val bad = File(verifyFail.targetPath)
+                if (bad.exists()) bad.renameTo(File(bad.parentFile, bad.name + ".bad"))
+                updateState(key, _states.value[key]!!.copy(state = DownloadState.FAILED, error = "Verification failed: ${verifyFail.fileName}"))
+            } else {
+                val finalSize = request.files.sumOf { File(it.targetPath).takeIf { f -> f.exists() }?.length() ?: 0L }
+                updateState(
+                    key,
+                    _states.value[key]!!.copy(
+                        state = DownloadState.COMPLETED,
+                        downloadedBytes = finalSize,
+                        totalBytes = finalSize,
+                        error = null,
+                        activeFile = null
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            AppLogger.e("Download failed", t)
+            _states.value[key]?.let { state ->
+                if (state.state != DownloadState.CANCELED) {
+                    updateState(key, state.copy(state = DownloadState.FAILED, error = t.message ?: "Unknown error"))
+                }
+            }
+        } finally {
+            jobs.remove(key)
+            persistQueue(context)
+        }
+    }
+
+    private fun downloadSingleFile(
+        key: String,
+        file: DownloadFile,
+        downloadedBeforeFile: Long,
+        totalBytesHint: Long
+    ): Long {
+        val target = File(file.targetPath)
+        val existingBytes = if (target.exists()) target.length() else 0L
+        var conn: HttpURLConnection? = null
+        var downloaded = downloadedBeforeFile + existingBytes
+        try {
+            updateState(
+                key,
+                _states.value[key]!!.copy(
+                    state = DownloadState.DOWNLOADING,
+                    activeFile = file.fileName,
+                    downloadedBytes = downloaded,
+                    totalBytes = if (totalBytesHint > 0) totalBytesHint else _states.value[key]!!.totalBytes
+                )
+            )
+
+            conn = URL(file.url).openConnection() as HttpURLConnection
+            if (existingBytes > 0) conn.setRequestProperty("Range", "bytes=$existingBytes-")
             conn.setRequestProperty("User-Agent", Constants.USER_AGENT)
             conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
@@ -94,19 +168,17 @@ object DownloadCoordinator {
                 val errBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 throw IllegalStateException("HTTP $responseCode ${conn.responseMessage}. ${errBody.take(180)}")
             }
+
             val appendMode = responseCode == HttpURLConnection.HTTP_PARTIAL
             if (existingBytes > 0 && !appendMode) {
                 target.delete()
+                downloaded -= existingBytes
             }
-
-            val totalFromHeader = conn.getHeaderFieldLong("Content-Length", -1L)
-            val total = if (appendMode && totalFromHeader > 0) totalFromHeader + existingBytes else totalFromHeader
 
             conn.inputStream.use { input ->
                 RandomAccessFile(target, "rw").use { raf ->
                     if (appendMode) raf.seek(existingBytes) else raf.setLength(0L)
                     val buffer = ByteArray(Constants.DOWNLOAD_BUFFER_SIZE)
-                    var downloaded = if (appendMode) existingBytes else 0L
                     while (true) {
                         val read = input.read(buffer)
                         if (read <= 0) break
@@ -115,45 +187,15 @@ object DownloadCoordinator {
                         _states.value[key]?.let { state ->
                             updateState(
                                 key,
-                                state.copy(
-                                    downloadedBytes = downloaded,
-                                    totalBytes = if (total > 0) total else state.totalBytes
-                                )
+                                state.copy(downloadedBytes = downloaded)
                             )
                         }
                     }
                 }
             }
-
-            updateState(key, _states.value[key]!!.copy(state = DownloadState.VERIFYING))
-
-            val sizeOk = FileVerifier.verifySize(target, request.expectedSizeBytes)
-            val shaOk = FileVerifier.verifySha(target, request.expectedSha256)
-            if (!sizeOk || !shaOk) {
-                val quarantine = File(target.parentFile, target.name + ".bad")
-                target.renameTo(quarantine)
-                updateState(key, _states.value[key]!!.copy(state = DownloadState.FAILED, error = "Verification failed"))
-            } else {
-                updateState(
-                    key,
-                    _states.value[key]!!.copy(
-                        state = DownloadState.COMPLETED,
-                        downloadedBytes = target.length(),
-                        totalBytes = target.length(),
-                        error = null
-                    )
-                )
-            }
-        } catch (t: Throwable) {
-            AppLogger.e("Download failed", t)
-            val state = _states.value[key]
-            if (state != null && state.state != DownloadState.CANCELED) {
-                updateState(key, state.copy(state = DownloadState.FAILED, error = t.message ?: "Unknown error"))
-            }
+            return downloaded
         } finally {
             runCatching { conn?.disconnect() }
-            jobs.remove(key)
-            persistQueue(context)
         }
     }
 
@@ -166,15 +208,25 @@ object DownloadCoordinator {
         val arr = JSONArray()
         _states.value.values
             .filter { it.state == DownloadState.QUEUED || it.state == DownloadState.DOWNLOADING || it.state == DownloadState.PAUSED }
-            .forEach {
+            .forEach { state ->
+                val filesArr = JSONArray()
+                state.request.files.forEach { f ->
+                    filesArr.put(
+                        JSONObject()
+                            .put("fileName", f.fileName)
+                            .put("url", f.url)
+                            .put("targetPath", f.targetPath)
+                            .put("expectedSha256", f.expectedSha256)
+                            .put("expectedSizeBytes", f.expectedSizeBytes)
+                    )
+                }
+
                 arr.put(
                     JSONObject()
-                        .put("modelId", it.request.modelId)
-                        .put("quant", it.request.quant)
-                        .put("url", it.request.url)
-                        .put("targetPath", it.request.targetPath)
-                        .put("expectedSha256", it.request.expectedSha256)
-                        .put("expectedSizeBytes", it.request.expectedSizeBytes)
+                        .put("modelId", state.request.modelId)
+                        .put("runtime", state.request.runtime.name)
+                        .put("variant", state.request.variant)
+                        .put("files", filesArr)
                 )
             }
         file.writeText(arr.toString())
@@ -189,14 +241,30 @@ object DownloadCoordinator {
         return buildList {
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
+                val runtime = runCatching {
+                    ModelRuntime.valueOf(obj.optString("runtime"))
+                }.getOrDefault(ModelRuntime.LLAMA_CPP_GGUF)
+                val filesArr = obj.optJSONArray("files") ?: JSONArray()
+                val files = buildList {
+                    for (j in 0 until filesArr.length()) {
+                        val fileObj = filesArr.optJSONObject(j) ?: continue
+                        add(
+                            DownloadFile(
+                                fileName = fileObj.optString("fileName"),
+                                url = fileObj.optString("url"),
+                                targetPath = fileObj.optString("targetPath"),
+                                expectedSha256 = if (fileObj.has("expectedSha256") && !fileObj.isNull("expectedSha256")) fileObj.optString("expectedSha256") else null,
+                                expectedSizeBytes = if (fileObj.has("expectedSizeBytes") && !fileObj.isNull("expectedSizeBytes")) fileObj.optLong("expectedSizeBytes") else null
+                            )
+                        )
+                    }
+                }
                 add(
                     DownloadRequest(
                         modelId = obj.optString("modelId"),
-                        quant = obj.optString("quant"),
-                        url = obj.optString("url"),
-                        targetPath = obj.optString("targetPath"),
-                        expectedSha256 = if (obj.has("expectedSha256") && !obj.isNull("expectedSha256")) obj.optString("expectedSha256") else null,
-                        expectedSizeBytes = if (obj.has("expectedSizeBytes")) obj.optLong("expectedSizeBytes") else null
+                        runtime = runtime,
+                        variant = obj.optString("variant"),
+                        files = files
                     )
                 )
             }

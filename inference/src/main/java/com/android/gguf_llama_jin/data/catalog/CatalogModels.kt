@@ -1,20 +1,38 @@
 package com.android.gguf_llama_jin.data.catalog
 
-data class QuantFile(
+import com.android.gguf_llama_jin.core.ModelRuntime
+
+enum class RemoteFileRole {
+    MODEL,
+    TOKENIZER,
+    CONFIG,
+    OTHER
+}
+
+data class RemoteFileRef(
     val fileName: String,
-    val quant: String,
-    val sizeBytes: Long,
     val downloadUrl: String,
-    val sha256: String? = null
+    val sizeBytes: Long,
+    val sha256: String? = null,
+    val role: RemoteFileRole
+)
+
+data class ModelVariant(
+    val variantId: String,
+    val sizeBytes: Long,
+    val downloadFiles: List<RemoteFileRef>,
+    val metadata: Map<String, String> = emptyMap()
 )
 
 data class CatalogModel(
     val id: String,
     val displayName: String,
     val repo: String,
+    val runtime: ModelRuntime,
     val paramsApprox: String,
     val tags: List<String>,
     val license: String?,
-    val ggufFiles: List<QuantFile>,
-    val recommendedTier: String
+    val variants: List<ModelVariant>,
+    val recommendedTier: String,
+    val unsupportedReason: String? = null
 )

@@ -28,6 +28,7 @@ android {
 dependencies {
     implementation(project(":inference"))
     implementation(project(":llama_cpp"))
+    implementation(project(":onnx_runtime"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

@@ -9,8 +9,9 @@ import com.android.gguf_llama_jin.core.CapabilitySnapshot
 import com.android.gguf_llama_jin.core.Constants
 import com.android.gguf_llama_jin.core.DeviceHeuristics
 import com.android.gguf_llama_jin.core.FitVerdict
+import com.android.gguf_llama_jin.core.ModelRuntime
 import com.android.gguf_llama_jin.data.catalog.CatalogModel
-import com.android.gguf_llama_jin.data.catalog.HuggingFaceModelSource
+import com.android.gguf_llama_jin.data.catalog.ModelVariant
 import com.android.gguf_llama_jin.data.download.DownloadCoordinator
 import com.android.gguf_llama_jin.data.download.DownloadState
 import com.android.gguf_llama_jin.data.download.DownloadTaskState
@@ -29,6 +30,8 @@ import com.android.gguf_llama_jin.domain.websearch.WebSearchDecision
 import com.android.gguf_llama_jin.domain.websearch.WebSearchGate
 import com.android.gguf_llama_jin.inference.InferenceSessionManager
 import com.android.gguf_llama_jin.inference.LlmNativeBridgeImpl
+import com.android.gguf_llama_jin.inference.OnnxRuntimeBridgeImpl
+import com.android.gguf_llama_jin.inference.RuntimeModelRef
 import com.android.gguf_llama_jin.inference.SamplingParams
 import com.android.gguf_llama_jin.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class ChatMessage(
     val role: String,
@@ -60,10 +64,12 @@ data class ChatUiMeta(
 data class AppUiState(
     val loadingCatalog: Boolean = false,
     val catalog: List<CatalogModel> = emptyList(),
+    val selectedRuntimeFilter: ModelRuntime = ModelRuntime.LLAMA_CPP_GGUF,
+    val preferredRuntime: ModelRuntime = ModelRuntime.LLAMA_CPP_GGUF,
     val installed: List<InstalledModel> = emptyList(),
     val downloads: Map<String, DownloadTaskState> = emptyMap(),
-    val selectedModelId: String? = null,
-    val selectedQuantByModel: Map<String, String> = emptyMap(),
+    val selectedModelByRuntime: Map<ModelRuntime, String?> = emptyMap(),
+    val selectedVariantByModel: Map<String, String> = emptyMap(),
     val modelMessages: Map<String, String> = emptyMap(),
     val threads: List<ChatThread> = emptyList(),
     val chatMeta: ChatUiMeta = ChatUiMeta(),
@@ -91,27 +97,35 @@ data class AppUiState(
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = getApplication<Application>()
-    private val catalogUseCase = ModelCatalogUseCase(HuggingFaceModelSource())
+    private val catalogUseCase = ModelCatalogUseCase()
     private val modelRegistry = ModelRegistry(appContext)
     private val installUseCase = InstallModelUseCase(modelRegistry)
     private val settings = AppSettings(appContext)
     private val telemetry = Telemetry(appContext)
-    private val inference = InferenceSessionManager(LlmNativeBridgeImpl())
+    private val inference = InferenceSessionManager(setOf(LlmNativeBridgeImpl(), OnnxRuntimeBridgeImpl()))
     private val webSearchProvider: WebSearchProvider = WebSearchProviderFactory.create()
     private val webSearchGate: WebSearchGate = RuleBasedWebSearchGate()
 
     private val handledInstalls = mutableSetOf<String>()
 
+    private fun key(model: CatalogModel) = "${model.runtime.name}:${model.id}"
+
     private val _uiState = MutableStateFlow(
         AppUiState(
-            firstRun = settings.defaultModelId() == null,
+            firstRun = settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF) == null &&
+                settings.defaultModelId(ModelRuntime.ONNX_RUNTIME) == null,
             capabilitySnapshot = DeviceHeuristics.snapshot(appContext),
             telemetryEnabled = telemetry.isEnabled(),
             historyEnabled = settings.chatHistoryEnabled(),
             wifiOnly = settings.wifiOnlyDownloads(),
             webSearchAllowed = settings.webSearchAllowed(),
             webSearchEnabled = settings.webSearchAllowed(),
-            selectedModelId = settings.defaultModelId()
+            preferredRuntime = settings.preferredRuntime(),
+            selectedRuntimeFilter = settings.preferredRuntime(),
+            selectedModelByRuntime = mapOf(
+                ModelRuntime.LLAMA_CPP_GGUF to settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF),
+                ModelRuntime.ONNX_RUNTIME to settings.defaultModelId(ModelRuntime.ONNX_RUNTIME)
+            )
         )
     )
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -119,33 +133,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var generationJob: Job? = null
 
     init {
+        settings.migrateLegacyDefaultsIfNeeded()
         viewModelScope.launch {
             DownloadCoordinator.states.collect { states ->
                 _uiState.value = _uiState.value.copy(downloads = states)
                 states.values.forEach { task ->
                     when (task.state) {
                         DownloadState.COMPLETED -> {
-                            val key = task.request.id()
-                            if (!handledInstalls.contains(key)) {
-                                handledInstalls += key
+                            val installKey = task.request.id()
+                            if (!handledInstalls.contains(installKey)) {
+                                handledInstalls += installKey
+                                val modelFile = task.request.files.firstOrNull { it.fileName.endsWith(".gguf", true) || it.fileName.endsWith(".onnx", true) }
+                                    ?: task.request.files.firstOrNull()
+                                    ?: return@forEach
+                                val size = task.request.files.sumOf { f -> File(f.targetPath).takeIf { it.exists() }?.length() ?: 0L }
+                                val assetDir = if (task.request.runtime == ModelRuntime.ONNX_RUNTIME) {
+                                    File(modelFile.targetPath).parentFile?.absolutePath
+                                } else null
                                 installUseCase.markInstalled(
                                     InstalledModel(
                                         id = task.request.modelId,
-                                        quant = task.request.quant,
-                                        path = task.request.targetPath,
-                                        sizeBytes = java.io.File(task.request.targetPath).length(),
-                                        sha256 = task.request.expectedSha256,
+                                        runtime = task.request.runtime,
+                                        variant = task.request.variant,
+                                        path = modelFile.targetPath,
+                                        sizeBytes = size,
+                                        sha256 = task.request.files.firstOrNull()?.expectedSha256,
                                         installedAt = System.currentTimeMillis(),
-                                        lastUsedAt = System.currentTimeMillis()
+                                        lastUsedAt = System.currentTimeMillis(),
+                                        assetDir = assetDir
                                     )
                                 )
                                 loadInstalled()
-                                setModelMessage(task.request.modelId, "Download complete: ${task.request.quant}")
+                                setModelMessage(task.request.runtime, task.request.modelId, "Download complete: ${task.request.variant}")
                             }
                         }
 
                         DownloadState.FAILED -> {
-                            setModelMessage(task.request.modelId, task.error ?: "Download failed")
+                            setModelMessage(task.request.runtime, task.request.modelId, task.error ?: "Download failed")
                         }
 
                         else -> Unit
@@ -158,21 +182,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadInstalled()
     }
 
+    fun setCatalogRuntimeFilter(runtime: ModelRuntime) {
+        _uiState.value = _uiState.value.copy(selectedRuntimeFilter = runtime)
+        settings.setPreferredRuntime(runtime)
+        _uiState.value = _uiState.value.copy(preferredRuntime = runtime)
+        refreshCatalog()
+    }
+
+    fun setPreferredRuntime(runtime: ModelRuntime) {
+        settings.setPreferredRuntime(runtime)
+        _uiState.value = _uiState.value.copy(preferredRuntime = runtime)
+    }
+
     fun refreshCatalog() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(loadingCatalog = true, statusMessage = null)
-            when (val result = catalogUseCase.execute()) {
+            when (val result = catalogUseCase.execute(_uiState.value.selectedRuntimeFilter)) {
                 is AppResult.Success -> {
                     val defaults = result.value.associate { model ->
-                        val preferred = model.ggufFiles.firstOrNull { it.quant == Constants.DEFAULT_QUANT }?.quant
-                            ?: model.ggufFiles.firstOrNull()?.quant
-                            ?: Constants.DEFAULT_QUANT
-                        model.id to preferred
+                        val preferred = when (model.runtime) {
+                            ModelRuntime.LLAMA_CPP_GGUF -> model.variants.firstOrNull { it.variantId == Constants.DEFAULT_QUANT }?.variantId
+                            ModelRuntime.ONNX_RUNTIME -> model.variants.firstOrNull()?.variantId
+                        } ?: model.variants.firstOrNull()?.variantId ?: "default"
+                        key(model) to preferred
                     }
                     _uiState.value = _uiState.value.copy(
                         loadingCatalog = false,
                         catalog = result.value,
-                        selectedQuantByModel = defaults
+                        selectedVariantByModel = _uiState.value.selectedVariantByModel + defaults
                     )
                 }
 
@@ -186,78 +223,89 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setQuant(modelId: String, quant: String) {
+    fun setVariant(model: CatalogModel, variant: String) {
         _uiState.value = _uiState.value.copy(
-            selectedQuantByModel = _uiState.value.selectedQuantByModel.toMutableMap().apply {
-                put(modelId, quant)
+            selectedVariantByModel = _uiState.value.selectedVariantByModel.toMutableMap().apply {
+                put(key(model), variant)
             }
         )
     }
 
     fun startDownload(model: CatalogModel) {
-        val selectedQuant = _uiState.value.selectedQuantByModel[model.id] ?: Constants.DEFAULT_QUANT
-        val selectedFile = model.ggufFiles.firstOrNull { it.quant == selectedQuant } ?: return
-        val isInstalled = _uiState.value.installed.any { it.id == model.id && it.quant == selectedQuant }
+        val selectedVariantId = _uiState.value.selectedVariantByModel[key(model)] ?: model.variants.firstOrNull()?.variantId ?: return
+        val selectedVariant = model.variants.firstOrNull { it.variantId == selectedVariantId } ?: return
+        val isInstalled = _uiState.value.installed.any {
+            it.id == model.id && it.runtime == model.runtime && it.variant == selectedVariantId
+        }
         if (isInstalled) {
-            setModelMessage(model.id, "Model already downloaded for $selectedQuant")
+            setModelMessage(model.runtime, model.id, "Model already downloaded for $selectedVariantId")
             return
         }
 
         val snapshot = _uiState.value.capabilitySnapshot ?: DeviceHeuristics.snapshot(appContext)
-        val storageVerdict = DeviceHeuristics.storageVerdict(snapshot.freeStorageBytes, selectedFile.sizeBytes)
-        val estimatedPeak = (selectedFile.sizeBytes * 1.8).toLong()
+        val storageVerdict = DeviceHeuristics.storageVerdict(snapshot.freeStorageBytes, selectedVariant.sizeBytes)
+        val estimatedPeak = (selectedVariant.sizeBytes * 1.8).toLong()
         val ramVerdict = DeviceHeuristics.ramVerdict(snapshot.availableRamMb * 1024L * 1024L, estimatedPeak)
 
         if (storageVerdict == FitVerdict.BLOCK || ramVerdict == FitVerdict.BLOCK) {
             setModelMessage(
+                model.runtime,
                 model.id,
-                "This model is likely too large for current device resources. Try a smaller quant/model."
+                "This model is likely too large for current device resources. Try a smaller variant/model."
             )
             return
         }
 
-        clearModelMessage(model.id)
+        clearModelMessage(model.runtime, model.id)
         when (val result = installUseCase.enqueueDownload(
             context = appContext,
+            runtime = model.runtime,
             modelId = model.id,
-            quant = selectedQuant,
-            url = selectedFile.downloadUrl,
-            expectedSize = selectedFile.sizeBytes
+            variant = selectedVariant
         )) {
-            is AppResult.Success -> setModelMessage(model.id, "Download started: $selectedQuant")
-            is AppResult.Error -> setModelMessage(model.id, result.message)
+            is AppResult.Success -> setModelMessage(model.runtime, model.id, "Download started: $selectedVariantId")
+            is AppResult.Error -> setModelMessage(model.runtime, model.id, result.message)
         }
     }
 
     fun pauseDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id } ?: return
+        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
         viewModelScope.launch {
             DownloadCoordinator.pause(task.request)
-            setModelMessage(model.id, "Paused: ${task.request.quant}")
+            setModelMessage(model.runtime, model.id, "Paused: ${task.request.variant}")
         }
     }
 
     fun resumeDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id } ?: return
+        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
         DownloadCoordinator.resume(appContext, task.request)
-        setModelMessage(model.id, "Resumed: ${task.request.quant}")
+        setModelMessage(model.runtime, model.id, "Resumed: ${task.request.variant}")
     }
 
     fun stopDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id } ?: return
+        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
         viewModelScope.launch {
             DownloadCoordinator.cancel(task.request)
-            setModelMessage(model.id, "Stopped: ${task.request.quant}")
+            setModelMessage(model.runtime, model.id, "Stopped: ${task.request.variant}")
         }
     }
 
-    fun chooseDefaultModel(modelId: String) {
-        settings.setDefaultModelId(modelId)
+    fun chooseDefaultModel(runtime: ModelRuntime, modelId: String) {
+        settings.setDefaultModelId(runtime, modelId)
+        settings.setPreferredRuntime(runtime)
         _uiState.value = _uiState.value.copy(
-            selectedModelId = modelId,
+            selectedModelByRuntime = _uiState.value.selectedModelByRuntime.toMutableMap().apply {
+                put(runtime, modelId)
+            },
+            preferredRuntime = runtime,
+            selectedRuntimeFilter = runtime,
             firstRun = false,
             statusMessage = "Default model set"
         )
+    }
+
+    fun chooseDefaultModel(modelId: String) {
+        chooseDefaultModel(_uiState.value.preferredRuntime, modelId)
     }
 
     fun setChatInput(value: String) {
@@ -358,18 +406,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val prompt = _uiState.value.chatInput.trim()
         if (prompt.isBlank()) return
 
-        val modelId = _uiState.value.selectedModelId
-        val installedModel = _uiState.value.installed.firstOrNull { it.id == modelId }
+        val runtime = _uiState.value.preferredRuntime
+        val modelId = _uiState.value.selectedModelByRuntime[runtime]
+        val installedModel = _uiState.value.installed.firstOrNull { it.id == modelId && it.runtime == runtime }
         if (installedModel == null) {
-            _uiState.value = _uiState.value.copy(statusMessage = "Install and select a model first")
-            AppLogger.e("sendPrompt blocked: no installed model selected. selectedModelId=$modelId")
+            _uiState.value = _uiState.value.copy(statusMessage = "Install and select a model first for ${runtime.name}")
+            AppLogger.e("sendPrompt blocked: no installed model selected. runtime=$runtime selectedModelId=$modelId")
             return
         }
 
         appendUserMessage(prompt)
         appendAssistantToken("")
 
-        AppLogger.i("sendPrompt modelId=${installedModel.id} quant=${installedModel.quant} path=${installedModel.path} promptLen=${prompt.length}")
+        AppLogger.i("sendPrompt runtime=${installedModel.runtime} modelId=${installedModel.id} variant=${installedModel.variant} path=${installedModel.path} promptLen=${prompt.length}")
 
         generationJob?.cancel()
         _uiState.value = _uiState.value.copy(
@@ -419,7 +468,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(lastSources = sourcesForMessage)
 
             val session = withContext(Dispatchers.IO) {
-                inference.ensureSession(installedModel.path, "You are a helpful local assistant.")
+                inference.ensureSession(
+                    RuntimeModelRef(
+                        modelId = installedModel.id,
+                        runtime = installedModel.runtime,
+                        variant = installedModel.variant,
+                        path = installedModel.path,
+                        assetDir = installedModel.assetDir
+                    ),
+                    "You are a helpful local assistant."
+                )
             }
             if (session == 0L) {
                 _uiState.value = _uiState.value.copy(
@@ -446,14 +504,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         webSearchInFlight = false
                     )
                     finalizeAssistantMessage()
-                    AppLogger.i("generation complete. sessionHandle=$session tokens=$tokenCount ttftMs=${_uiState.value.ttftMs} tps=$tps")
                     telemetry.track("generation_done", mapOf("tokens" to tokenCount.toString()))
                     return@collect
                 }
 
                 if (firstTokenNs == null && chunk.token.isNotEmpty()) {
                     firstTokenNs = System.nanoTime() - startNs
-                    AppLogger.i("first token received. sessionHandle=$session ttftMs=${firstTokenNs?.div(1_000_000)}")
                 }
                 tokenCount++
                 appendAssistantToken(chunk.token)
@@ -462,7 +518,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopGeneration() {
-        AppLogger.i("stopGeneration requested")
         inference.stop()
         generationJob?.cancel()
         _uiState.value = _uiState.value.copy(generating = false, webSearchInFlight = false)
@@ -526,18 +581,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return firstUser.take(40)
     }
 
-    private fun setModelMessage(modelId: String, message: String) {
+    private fun setModelMessage(runtime: ModelRuntime, modelId: String, message: String) {
+        val key = "${runtime.name}:$modelId"
         _uiState.value = _uiState.value.copy(
             modelMessages = _uiState.value.modelMessages.toMutableMap().apply {
-                put(modelId, message)
+                put(key, message)
             }
         )
     }
 
-    private fun clearModelMessage(modelId: String) {
+    private fun clearModelMessage(runtime: ModelRuntime, modelId: String) {
+        val key = "${runtime.name}:$modelId"
         _uiState.value = _uiState.value.copy(
             modelMessages = _uiState.value.modelMessages.toMutableMap().apply {
-                remove(modelId)
+                remove(key)
             }
         )
     }

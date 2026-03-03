@@ -6,7 +6,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +22,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -31,16 +29,12 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -48,12 +42,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -64,281 +55,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.android.gguf_llama_jin.core.ModelRuntime
-import com.android.gguf_llama_jin.data.catalog.CatalogModel
-import com.android.gguf_llama_jin.data.download.DownloadState
 import com.android.gguf_llama_jin.data.websearch.WebSearchHit
 import com.android.gguf_llama_jin.ui.viewmodel.AppUiState
 import com.android.gguf_llama_jin.ui.viewmodel.AppViewModel
 import com.android.gguf_llama_jin.ui.viewmodel.ChatMessage
-import kotlin.math.roundToInt
-
-@Composable
-fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
-    val state by viewModel.uiState.collectAsState()
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    val query = searchQuery.trim()
-    val catalog = state.catalog.filter {
-        query.isBlank() ||
-            it.displayName.contains(query, true) ||
-            it.repo.contains(query, true) ||
-            it.tags.any { t -> t.contains(query, true) }
-    }
-
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(padding)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Search, contentDescription = null)
-                        BasicTextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            modifier = Modifier.weight(1f),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                            decorationBox = { inner ->
-                                if (searchQuery.isBlank()) {
-                                    Text("Search models", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                inner()
-                            }
-                        )
-                        if (searchQuery.isNotBlank()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Filled.Close, contentDescription = "Clear")
-                            }
-                        }
-                    }
-                }
-                FilledIconButton(onClick = { viewModel.refreshCatalog() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                }
-            }
-        }
-
-        item {
-            RuntimeFilterRow(
-                selected = state.selectedRuntimeFilter,
-                onSelect = { viewModel.setCatalogRuntimeFilter(it) }
-            )
-        }
-
-        if (state.loadingCatalog) {
-            item {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                }
-            }
-        }
-
-        val installedByRuntime = state.installed.groupBy { it.runtime }
-        installedByRuntime.forEach { (runtime, models) ->
-            if (models.isNotEmpty()) {
-                item {
-                    Text(
-                        "Installed (${runtime.label()})",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                items(models) { installed ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(installed.id, fontWeight = FontWeight.Bold)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    RuntimeChip(runtime)
-                                    AssistChip(onClick = {}, label = { Text(installed.variant) })
-                                }
-                                Text("Size: ${formatFileSize(installed.sizeBytes)}")
-                            }
-                            val isDefault = state.selectedModelByRuntime[runtime] == installed.id
-                            if (isDefault) {
-                                FilledTonalIconButton(onClick = {}) {
-                                    Icon(Icons.Filled.CheckCircle, contentDescription = "Selected")
-                                }
-                            } else {
-                                OutlinedButton(onClick = { viewModel.chooseDefaultModel(runtime, installed.id) }) {
-                                    Text("Set Default")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        item { HorizontalDivider() }
-
-        item {
-            Text("Model Catalog", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        }
-
-        if (catalog.isEmpty() && !state.loadingCatalog) {
-            item {
-                Text("No models found", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-
-        items(catalog) { model ->
-            CatalogModelCard(model = model, state = state, viewModel = viewModel)
-        }
-    }
-}
-
-@Composable
-private fun RuntimeFilterRow(selected: ModelRuntime, onSelect: (ModelRuntime) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        AssistChip(
-            onClick = { onSelect(ModelRuntime.LLAMA_CPP_GGUF) },
-            label = { Text("GGUF") },
-            trailingIcon = {
-                if (selected == ModelRuntime.LLAMA_CPP_GGUF) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                }
-            }
-        )
-        AssistChip(
-            onClick = { onSelect(ModelRuntime.ONNX_RUNTIME) },
-            label = { Text("ONNX") },
-            trailingIcon = {
-                if (selected == ModelRuntime.ONNX_RUNTIME) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: AppViewModel) {
-    val variantKey = "${model.runtime.name}:${model.id}"
-    val selectedVariant = state.selectedVariantByModel[variantKey] ?: model.variants.firstOrNull()?.variantId.orEmpty()
-    val selected = model.variants.firstOrNull { it.variantId == selectedVariant } ?: model.variants.firstOrNull() ?: return
-    val task = state.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime }
-    val isInstalled = state.installed.any { it.id == model.id && it.runtime == model.runtime && it.variant == selected.variantId }
-    val message = state.modelMessages["${model.runtime.name}:${model.id}"]
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(model.displayName, fontWeight = FontWeight.Bold)
-                RuntimeChip(model.runtime)
-            }
-            Text("Params: ${model.paramsApprox} | Tier: ${model.recommendedTier}")
-            Text(model.repo)
-            if (model.runtime == ModelRuntime.ONNX_RUNTIME) {
-                val fileCount = selected.metadata["files"] ?: selected.downloadFiles.size.toString()
-                Text("Package files: $fileCount")
-            }
-
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                model.variants.forEach { variant ->
-                    AssistChip(
-                        onClick = { viewModel.setVariant(model, variant.variantId) },
-                        label = { Text(if (selected.variantId == variant.variantId) "${variant.variantId} *" else variant.variantId) }
-                    )
-                }
-            }
-
-            Text("Size: ${formatFileSize(selected.sizeBytes)}")
-
-            if (task != null && task.state != DownloadState.FAILED && task.state != DownloadState.CANCELED) {
-                Text("Status: ${task.state}")
-                val progress = if (task.totalBytes > 0) (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f) else null
-                if (progress != null) {
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-                    Text("${(progress * 100f).roundToInt()}%")
-                } else {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-            }
-
-            if (!message.isNullOrBlank()) {
-                Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (isInstalled) {
-                    FilledTonalIconButton(onClick = {}) { Icon(Icons.Filled.CheckCircle, contentDescription = "Downloaded") }
-                } else {
-                    FilledIconButton(
-                        onClick = { viewModel.startDownload(model) },
-                        enabled = task == null || task.state == DownloadState.FAILED || task.state == DownloadState.CANCELED
-                    ) {
-                        Icon(Icons.Filled.Download, contentDescription = "Download")
-                    }
-                }
-
-                val isDefault = state.selectedModelByRuntime[model.runtime] == model.id
-                OutlinedButton(onClick = { viewModel.chooseDefaultModel(model.runtime, model.id) }, enabled = isInstalled && !isDefault) {
-                    Text(if (isDefault) "Selected" else "Set Default")
-                }
-            }
-
-            if (task != null && task.state != DownloadState.COMPLETED && task.state != DownloadState.CANCELED && task.state != DownloadState.FAILED) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalIconButton(onClick = { viewModel.pauseDownload(model) }, enabled = task.state == DownloadState.DOWNLOADING) {
-                        Icon(Icons.Filled.Pause, contentDescription = "Pause")
-                    }
-                    FilledTonalIconButton(onClick = { viewModel.resumeDownload(model) }, enabled = task.state == DownloadState.PAUSED) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = "Resume")
-                    }
-                    FilledTonalIconButton(onClick = { viewModel.stopDownload(model) }) {
-                        Icon(Icons.Filled.Stop, contentDescription = "Stop")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RuntimeChip(runtime: ModelRuntime) {
-    AssistChip(onClick = {}, label = { Text(runtime.label()) })
-}
 
 @Composable
 fun ChatScreen(
@@ -450,8 +177,7 @@ fun ChatScreen(
                 generating = state.generating,
                 input = state.chatInput,
                 webSearchEnabled = state.webSearchEnabled,
-                webSearchInFlight = state.webSearchInFlight,
-                onBrowseModels = onBrowseModels
+                webSearchInFlight = state.webSearchInFlight
             )
 
             Text(
@@ -501,8 +227,7 @@ private fun ChatComposer(
     generating: Boolean,
     input: String,
     webSearchEnabled: Boolean,
-    webSearchInFlight: Boolean,
-    onBrowseModels: () -> Unit
+    webSearchInFlight: Boolean
 ) {
     Row(
         modifier = Modifier
@@ -718,116 +443,4 @@ private fun SourceList(sources: List<WebSearchHit>) {
             }
         }
     }
-}
-
-@Composable
-fun SettingsScreen(
-    viewModel: AppViewModel,
-    padding: PaddingValues,
-    onBrowseModels: () -> Unit
-) {
-    val state by viewModel.uiState.collectAsState()
-    val snapshot = state.capabilitySnapshot
-
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(padding)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item { Text("Privacy & Behavior", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-        item { ToggleRow("Store chat history", state.historyEnabled) { viewModel.toggleHistory(it) } }
-        item { ToggleRow("Wi-Fi only downloads", state.wifiOnly) { viewModel.toggleWifiOnly(it) } }
-        item { ToggleRow("Telemetry (opt-in)", state.telemetryEnabled) { viewModel.toggleTelemetry(it) } }
-        item { ToggleRow("Allow web search in chat", state.webSearchAllowed) { viewModel.toggleWebSearchAllowed(it) } }
-        item { HorizontalDivider() }
-
-        item { Text("Preferred Runtime", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-        item {
-            RuntimeFilterRow(
-                selected = state.preferredRuntime,
-                onSelect = { viewModel.setPreferredRuntime(it) }
-            )
-        }
-
-        item { Text("Downloaded Models", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-        if (state.installed.isEmpty()) {
-            item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text("No models installed.", modifier = Modifier.padding(12.dp))
-                }
-            }
-        } else {
-            items(state.installed) { model ->
-                Card {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(model.id, fontWeight = FontWeight.SemiBold)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                RuntimeChip(model.runtime)
-                                AssistChip(onClick = {}, label = { Text(model.variant) })
-                            }
-                        }
-                        val isDefault = state.selectedModelByRuntime[model.runtime] == model.id
-                        if (isDefault) {
-                            FilledTonalIconButton(onClick = {}) {
-                                Icon(Icons.Filled.CheckCircle, contentDescription = "Selected model")
-                            }
-                        } else {
-                            OutlinedButton(onClick = { viewModel.chooseDefaultModel(model.runtime, model.id) }) {
-                                Text("Set Default")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Button(onClick = onBrowseModels, modifier = Modifier.fillMaxWidth()) {
-                Text("Browse & Download Models")
-            }
-        }
-
-        item { HorizontalDivider() }
-        item { Text("Device Info", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("RAM: ${snapshot?.totalRamMb ?: 0} MB")
-                    Text("Available RAM: ${snapshot?.availableRamMb ?: 0} MB")
-                    Text("Free storage: ${(snapshot?.freeStorageBytes ?: 0L) / (1024 * 1024 * 1024)} GB")
-                    Text("Recommended max model: ${(snapshot?.recommendedMaxModelBytes ?: 0L) / (1024 * 1024 * 1024)} GB")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ToggleRow(title: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(title)
-        Switch(checked = checked, onCheckedChange = onChecked)
-    }
-}
-
-private fun ModelRuntime.label(): String = when (this) {
-    ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
-    ModelRuntime.ONNX_RUNTIME -> "ONNX"
-}
-
-private fun formatFileSize(sizeBytes: Long): String {
-    if (sizeBytes <= 0L) return "Unknown"
-    val mb = sizeBytes / (1024.0 * 1024.0)
-    if (mb < 1024.0) return "${mb.roundToInt()} MB"
-    val gb = mb / 1024.0
-    return String.format("%.2f GB", gb)
 }

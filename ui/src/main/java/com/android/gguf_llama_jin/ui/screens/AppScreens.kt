@@ -102,13 +102,6 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-            RuntimeFilterRow(
-                selected = state.selectedRuntimeFilter,
-                onSelect = { viewModel.setCatalogRuntimeFilter(it) }
-            )
-        }
-
-        item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -151,6 +144,13 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
                     Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                 }
             }
+        }
+
+        item {
+            RuntimeFilterRow(
+                selected = state.selectedRuntimeFilter,
+                onSelect = { viewModel.setCatalogRuntimeFilter(it) }
+            )
         }
 
         if (state.loadingCatalog) {
@@ -224,13 +224,28 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
 
 @Composable
 private fun RuntimeFilterRow(selected: ModelRuntime, onSelect: (ModelRuntime) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilledTonalButton(onClick = { onSelect(ModelRuntime.LLAMA_CPP_GGUF) }, enabled = selected != ModelRuntime.LLAMA_CPP_GGUF) {
-            Text("GGUF")
-        }
-        FilledTonalButton(onClick = { onSelect(ModelRuntime.ONNX_RUNTIME) }, enabled = selected != ModelRuntime.ONNX_RUNTIME) {
-            Text("ONNX")
-        }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        AssistChip(
+            onClick = { onSelect(ModelRuntime.LLAMA_CPP_GGUF) },
+            label = { Text("GGUF") },
+            trailingIcon = {
+                if (selected == ModelRuntime.LLAMA_CPP_GGUF) {
+                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                }
+            }
+        )
+        AssistChip(
+            onClick = { onSelect(ModelRuntime.ONNX_RUNTIME) },
+            label = { Text("ONNX") },
+            trailingIcon = {
+                if (selected == ModelRuntime.ONNX_RUNTIME) {
+                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                }
+            }
+        )
     }
 }
 
@@ -251,6 +266,10 @@ private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: 
             }
             Text("Params: ${model.paramsApprox} | Tier: ${model.recommendedTier}")
             Text(model.repo)
+            if (model.runtime == ModelRuntime.ONNX_RUNTIME) {
+                val fileCount = selected.metadata["files"] ?: selected.downloadFiles.size.toString()
+                Text("Package files: $fileCount")
+            }
 
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -362,6 +381,31 @@ fun ChatScreen(
                 modifier = Modifier.padding(top = 8.dp)
             )
 
+            if (!state.statusMessage.isNullOrBlank()) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = state.statusMessage ?: "",
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { viewModel.showModelPicker() }) {
+                                Text("Choose model")
+                            }
+                            OutlinedButton(onClick = { viewModel.clearStatus() }) {
+                                Text("Dismiss")
+                            }
+                        }
+                    }
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
@@ -401,11 +445,6 @@ fun ChatScreen(
                 }
             }
 
-            Text(
-                "TTFT: ${state.ttftMs ?: 0} ms | TPS: ${"%.2f".format(state.tokensPerSec ?: 0.0)}",
-                style = MaterialTheme.typography.bodyLarge
-            )
-
             ChatComposer(
                 viewModel = viewModel,
                 generating = state.generating,
@@ -415,7 +454,11 @@ fun ChatScreen(
                 onBrowseModels = onBrowseModels
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "TTFT: ${state.ttftMs ?: 0} ms | TPS: ${"%.2f".format(state.tokensPerSec ?: 0.0)}",
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
         }
 
         if (state.chatMeta.modelPickerVisible) {
@@ -487,7 +530,14 @@ private fun ChatComposer(
                     AssistChip(
                         onClick = { viewModel.disableWebSearchForNextSends() },
                         label = { Text("Search") },
-                        leadingIcon = { Icon(Icons.Filled.Language, contentDescription = null) }
+                        leadingIcon = { Icon(Icons.Filled.Language, contentDescription = null) },
+                        trailingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "Disable search",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     )
                 }
 
@@ -548,7 +598,7 @@ private fun ModelPickerBottomSheet(
                 viewModel = viewModel
             )
             RuntimeSection(
-                title = "ONNX Runtime",
+                title = "ONNX",
                 runtime = ModelRuntime.ONNX_RUNTIME,
                 state = state,
                 viewModel = viewModel
@@ -770,8 +820,8 @@ private fun ToggleRow(title: String, checked: Boolean, onChecked: (Boolean) -> U
 }
 
 private fun ModelRuntime.label(): String = when (this) {
-    ModelRuntime.LLAMA_CPP_GGUF -> "GGUF / llama.cpp"
-    ModelRuntime.ONNX_RUNTIME -> "ONNX Runtime"
+    ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
+    ModelRuntime.ONNX_RUNTIME -> "ONNX"
 }
 
 private fun formatFileSize(sizeBytes: Long): String {

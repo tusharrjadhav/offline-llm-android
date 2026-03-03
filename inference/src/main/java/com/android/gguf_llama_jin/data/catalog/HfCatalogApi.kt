@@ -52,9 +52,12 @@ class HfCatalogApi {
 
     suspend fun searchOnnxModels(limit: Int = 16): AppResult<List<CatalogModel>> = withContext(Dispatchers.IO) {
         try {
-            val queryUrl =
-                "${Constants.HF_API_BASE}/models?library=onnx&pipeline_tag=text-generation&sort=downloads&direction=-1&limit=$limit"
-            val modelIds = extractModelIds(getJsonArray(queryUrl))
+            val primaryUrl =
+                "${Constants.HF_API_BASE}/models?search=onnx%20instruct&sort=downloads&direction=-1&limit=${limit.coerceAtLeast(24)}"
+            val fallbackUrl =
+                "${Constants.HF_API_BASE}/models?library=onnx&pipeline_tag=text-generation&sort=downloads&direction=-1&limit=${limit.coerceAtLeast(24)}"
+            val modelIds = (extractModelIds(getJsonArray(primaryUrl)) + extractModelIds(getJsonArray(fallbackUrl)))
+                .distinct()
             val semaphore = Semaphore(4)
             val models = coroutineScope {
                 modelIds.map { modelId ->
@@ -134,7 +137,7 @@ class HfCatalogApi {
 
         val allFiles = mutableListOf<RemoteFileRef>()
         var modelFile: RemoteFileRef? = null
-        var tokenizerFile: RemoteFileRef? = null
+        var hasTokenizerAsset = false
 
         for (i in 0 until siblings.length()) {
             val sibling = siblings.optJSONObject(i) ?: continue
@@ -165,15 +168,25 @@ class HfCatalogApi {
             )
             allFiles += file
             if (role == RemoteFileRole.MODEL && modelFile == null) modelFile = file
-            if (role == RemoteFileRole.TOKENIZER && tokenizerFile == null) tokenizerFile = file
+            if (
+                role == RemoteFileRole.TOKENIZER ||
+                lower.endsWith("vocab.json") ||
+                lower.endsWith("tokenizer_config.json")
+            ) {
+                hasTokenizerAsset = true
+            }
         }
 
-        if (modelFile == null || tokenizerFile == null) return@withContext null
+        if (modelFile == null || !hasTokenizerAsset) return@withContext null
 
         val variant = ModelVariant(
             variantId = "ONNX",
             sizeBytes = allFiles.sumOf { it.sizeBytes.coerceAtLeast(0L) },
-            downloadFiles = allFiles.sortedBy { it.role.ordinal }
+            downloadFiles = allFiles.sortedBy { it.role.ordinal },
+            metadata = mapOf(
+                "files" to allFiles.size.toString(),
+                "model_file" to (modelFile?.fileName ?: "")
+            )
         )
 
         val display = modelId.substringAfterLast('/')

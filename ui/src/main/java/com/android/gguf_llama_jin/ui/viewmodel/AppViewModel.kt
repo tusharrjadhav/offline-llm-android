@@ -405,12 +405,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun sendPrompt(forceWebSearch: Boolean = false) {
         val prompt = _uiState.value.chatInput.trim()
         if (prompt.isBlank()) return
+        _uiState.value = _uiState.value.copy(statusMessage = null)
 
         val runtime = _uiState.value.preferredRuntime
         val modelId = _uiState.value.selectedModelByRuntime[runtime]
         val installedModel = _uiState.value.installed.firstOrNull { it.id == modelId && it.runtime == runtime }
         if (installedModel == null) {
-            _uiState.value = _uiState.value.copy(statusMessage = "Install and select a model first for ${runtime.name}")
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "Install and select a model first for ${runtime.name}",
+                chatMeta = _uiState.value.chatMeta.copy(modelPickerVisible = true)
+            )
             AppLogger.e("sendPrompt blocked: no installed model selected. runtime=$runtime selectedModelId=$modelId")
             return
         }

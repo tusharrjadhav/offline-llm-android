@@ -1,0 +1,2 @@
+ninja: Entering directory `/Users/tusharjadhav/Desktop/Android_test_project/GGUF_llama_JIN/llama_cpp/.cxx/Debug/5g2a4v60/arm64-v8a'
+ninja: no work to do.

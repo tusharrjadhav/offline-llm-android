@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.android.gguf_llama_jin.inference_module" >
+
+    <uses-sdk android:minSdkVersion="31" />
+
+    <application>
+        <service
+            android:name="com.android.gguf_llama_jin.data.download.DownloadForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+
+</manifest>

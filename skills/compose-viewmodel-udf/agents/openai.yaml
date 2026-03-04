@@ -1,0 +1,4 @@
+interface:
+  display_name: "Compose ViewModel UDF"
+  short_description: "Compose UDF ViewModel architecture pattern"
+  default_prompt: "Use $compose-viewmodel-udf to create or refactor this Jetpack Compose feature into UiState/Event/Effect with Route+Screen separation."

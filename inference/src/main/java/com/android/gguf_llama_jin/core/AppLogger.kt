@@ -13,6 +13,14 @@ object AppLogger {
         }
     }
 
+    fun w(message: String) {
+        try {
+            Log.w(TAG, message)
+        } catch (_: Throwable) {
+            println("[$TAG][WARN] $message")
+        }
+    }
+
     fun e(message: String, throwable: Throwable? = null) {
         try {
             Log.e(TAG, message, throwable)

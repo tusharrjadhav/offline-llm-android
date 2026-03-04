@@ -1,16 +1,18 @@
 package com.android.gguf_llama_jin.ui.viewmodel
 
 import com.android.gguf_llama_jin.core.ModelRuntime
-import com.android.gguf_llama_jin.data.catalog.CatalogModel
 
 sealed interface AppUiEvent {
-    data class SetCatalogRuntimeFilter(val runtime: ModelRuntime) : AppUiEvent
+    data class ToggleCatalogRuntimeFilter(val runtime: ModelRuntime) : AppUiEvent
     data class SetPreferredRuntime(val runtime: ModelRuntime) : AppUiEvent
-    data class SetVariant(val model: CatalogModel, val variant: String) : AppUiEvent
-    data class StartDownload(val model: CatalogModel) : AppUiEvent
-    data class PauseDownload(val model: CatalogModel) : AppUiEvent
-    data class ResumeDownload(val model: CatalogModel) : AppUiEvent
-    data class StopDownload(val model: CatalogModel) : AppUiEvent
+    data class OpenDownloadPicker(val repoId: String) : AppUiEvent
+    data object CloseDownloadPicker : AppUiEvent
+    data class SelectDownloadRuntime(val runtime: ModelRuntime) : AppUiEvent
+    data class SelectDownloadVariant(val runtime: ModelRuntime, val variantId: String) : AppUiEvent
+    data object ConfirmDownloadSelection : AppUiEvent
+    data class PauseDownload(val repoId: String, val runtime: ModelRuntime) : AppUiEvent
+    data class ResumeDownload(val repoId: String, val runtime: ModelRuntime) : AppUiEvent
+    data class StopDownload(val repoId: String, val runtime: ModelRuntime) : AppUiEvent
     data class ChooseDefaultModel(val runtime: ModelRuntime, val modelId: String) : AppUiEvent
     data class SetChatInput(val value: String) : AppUiEvent
     data class ToggleWebSearchAllowed(val enabled: Boolean) : AppUiEvent

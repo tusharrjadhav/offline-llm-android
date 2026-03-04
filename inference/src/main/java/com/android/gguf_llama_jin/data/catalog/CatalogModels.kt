@@ -24,7 +24,7 @@ data class ModelVariant(
     val metadata: Map<String, String> = emptyMap()
 )
 
-data class CatalogModel(
+data class CatalogRuntimeModel(
     val id: String,
     val displayName: String,
     val repo: String,
@@ -36,3 +36,23 @@ data class CatalogModel(
     val recommendedTier: String,
     val unsupportedReason: String? = null
 )
+
+data class RuntimeOption(
+    val runtime: ModelRuntime,
+    val variants: List<ModelVariant>,
+    val recommendedTier: String,
+    val unsupportedReason: String? = null
+)
+
+data class CatalogRepoModel(
+    val id: String,
+    val displayName: String,
+    val repo: String,
+    val paramsApprox: String,
+    val tags: List<String>,
+    val license: String?,
+    val runtimeOptions: Map<ModelRuntime, RuntimeOption>
+) {
+    val supportedRuntimes: Set<ModelRuntime>
+        get() = runtimeOptions.keys
+}

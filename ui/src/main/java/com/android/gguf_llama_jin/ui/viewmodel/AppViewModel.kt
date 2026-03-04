@@ -9,7 +9,7 @@ import com.android.gguf_llama_jin.core.Constants
 import com.android.gguf_llama_jin.core.DeviceHeuristics
 import com.android.gguf_llama_jin.core.FitVerdict
 import com.android.gguf_llama_jin.core.ModelRuntime
-import com.android.gguf_llama_jin.data.catalog.CatalogModel
+import com.android.gguf_llama_jin.data.catalog.CatalogRepoModel
 import com.android.gguf_llama_jin.data.download.DownloadCoordinator
 import com.android.gguf_llama_jin.data.download.DownloadState
 import com.android.gguf_llama_jin.data.download.id
@@ -56,7 +56,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val handledInstalls = mutableSetOf<String>()
 
-    private fun key(model: CatalogModel) = "${model.runtime.name}:${model.id}"
+    private fun key(repoId: String, runtime: ModelRuntime) = "${runtime.name}:$repoId"
+    private fun findRepo(repoId: String): CatalogRepoModel? = _uiState.value.catalog.firstOrNull { it.id == repoId }
+    private fun selectedVariant(repoId: String, runtime: ModelRuntime): String? {
+        val repo = findRepo(repoId) ?: return null
+        val variants = repo.runtimeOptions[runtime]?.variants.orEmpty()
+        if (variants.isEmpty()) return null
+        return _uiState.value.selectedVariantByModel[key(repoId, runtime)] ?: variants.first().variantId
+    }
 
     private val _uiState = MutableStateFlow(
         AppUiState(
@@ -69,7 +76,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             webSearchAllowed = settings.webSearchAllowed(),
             webSearchEnabled = settings.webSearchAllowed(),
             preferredRuntime = settings.preferredRuntime(),
-            selectedRuntimeFilter = settings.preferredRuntime(),
+            selectedRuntimeFilters = setOf(ModelRuntime.LLAMA_CPP_GGUF, ModelRuntime.ONNX),
             selectedModelByRuntime = mapOf(
                 ModelRuntime.LLAMA_CPP_GGUF to settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF),
                 ModelRuntime.ONNX to settings.defaultModelId(ModelRuntime.ONNX)
@@ -134,13 +141,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onEvent(event: AppUiEvent) {
         when (event) {
-            is AppUiEvent.SetCatalogRuntimeFilter -> setCatalogRuntimeFilter(event.runtime)
+            is AppUiEvent.ToggleCatalogRuntimeFilter -> toggleCatalogRuntimeFilter(event.runtime)
             is AppUiEvent.SetPreferredRuntime -> setPreferredRuntime(event.runtime)
-            is AppUiEvent.SetVariant -> setVariant(event.model, event.variant)
-            is AppUiEvent.StartDownload -> startDownload(event.model)
-            is AppUiEvent.PauseDownload -> pauseDownload(event.model)
-            is AppUiEvent.ResumeDownload -> resumeDownload(event.model)
-            is AppUiEvent.StopDownload -> stopDownload(event.model)
+            is AppUiEvent.OpenDownloadPicker -> openDownloadPicker(event.repoId)
+            AppUiEvent.CloseDownloadPicker -> closeDownloadPicker()
+            is AppUiEvent.SelectDownloadRuntime -> selectDownloadRuntime(event.runtime)
+            is AppUiEvent.SelectDownloadVariant -> selectDownloadVariant(event.runtime, event.variantId)
+            AppUiEvent.ConfirmDownloadSelection -> confirmDownloadSelection()
+            is AppUiEvent.PauseDownload -> pauseDownload(event.repoId, event.runtime)
+            is AppUiEvent.ResumeDownload -> resumeDownload(event.repoId, event.runtime)
+            is AppUiEvent.StopDownload -> stopDownload(event.repoId, event.runtime)
             is AppUiEvent.ChooseDefaultModel -> chooseDefaultModel(event.runtime, event.modelId)
             is AppUiEvent.SetChatInput -> setChatInput(event.value)
             is AppUiEvent.ToggleWebSearchAllowed -> toggleWebSearchAllowed(event.enabled)
@@ -164,10 +174,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setCatalogRuntimeFilter(runtime: ModelRuntime) {
-        _uiState.value = _uiState.value.copy(selectedRuntimeFilter = runtime)
-        settings.setPreferredRuntime(runtime)
-        _uiState.value = _uiState.value.copy(preferredRuntime = runtime)
+    fun toggleCatalogRuntimeFilter(runtime: ModelRuntime) {
+        val current = _uiState.value.selectedRuntimeFilters
+        val next = if (runtime in current) {
+            val removed = current - runtime
+            if (removed.isEmpty()) current else removed
+        } else {
+            current + runtime
+        }
+        _uiState.value = _uiState.value.copy(selectedRuntimeFilters = next)
         refreshCatalog()
     }
 
@@ -178,21 +193,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshCatalog() {
         viewModelScope.launch {
+            AppLogger.i("refreshCatalog filters=${_uiState.value.selectedRuntimeFilters}")
             _uiState.value = _uiState.value.copy(loadingCatalog = true, statusMessage = null)
-            when (val result = catalogUseCase.execute(_uiState.value.selectedRuntimeFilter)) {
+            when (val result = catalogUseCase.execute(_uiState.value.selectedRuntimeFilters)) {
                 is AppResult.Success -> {
-                    val defaults = result.value.associate { model ->
-                        val preferred = when (model.runtime) {
-                            ModelRuntime.LLAMA_CPP_GGUF -> model.variants.firstOrNull { it.variantId == Constants.DEFAULT_QUANT }?.variantId
-                            ModelRuntime.ONNX -> model.variants.firstOrNull()?.variantId
-                        } ?: model.variants.firstOrNull()?.variantId ?: "default"
-                        key(model) to preferred
+                    val defaults = mutableMapOf<String, String>()
+                    result.value.forEach { repo ->
+                        repo.runtimeOptions.forEach { (runtime, option) ->
+                            val preferred = when (runtime) {
+                                ModelRuntime.LLAMA_CPP_GGUF -> option.variants.firstOrNull { it.variantId == Constants.DEFAULT_QUANT }?.variantId
+                                ModelRuntime.ONNX -> option.variants.firstOrNull()?.variantId
+                            } ?: option.variants.firstOrNull()?.variantId ?: return@forEach
+                            defaults[key(repo.id, runtime)] = preferred
+                        }
                     }
                     _uiState.value = _uiState.value.copy(
                         loadingCatalog = false,
                         catalog = result.value,
                         selectedVariantByModel = _uiState.value.selectedVariantByModel + defaults
                     )
+                    AppLogger.i("refreshCatalog success models=${result.value.size}")
                 }
 
                 is AppResult.Error -> {
@@ -200,29 +220,66 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         loadingCatalog = false,
                         statusMessage = result.message
                     )
+                    AppLogger.e("refreshCatalog failed: ${result.message}")
                     _effects.tryEmit(AppUiEffect.ShowMessage(result.message))
                 }
             }
         }
     }
 
-    fun setVariant(model: CatalogModel, variant: String) {
+    fun openDownloadPicker(repoId: String) {
+        val repo = findRepo(repoId) ?: return
+        val runtime = repo.supportedRuntimes.firstOrNull() ?: return
+        val selectedRuntime = if (repo.supportedRuntimes.size == 1) runtime else _uiState.value.preferredRuntime.takeIf { it in repo.supportedRuntimes }
+            ?: runtime
+        val defaults = repo.runtimeOptions.mapValues { (_, option) ->
+            option.variants.firstOrNull()?.variantId.orEmpty()
+        }.filterValues { it.isNotBlank() }
         _uiState.value = _uiState.value.copy(
-            selectedVariantByModel = _uiState.value.selectedVariantByModel.toMutableMap().apply {
-                put(key(model), variant)
+            pendingDownloadRepoId = repoId,
+            downloadRuntimePickerVisible = true,
+            downloadRuntimeSelection = selectedRuntime,
+            downloadVariantSelectionByRuntime = _uiState.value.downloadVariantSelectionByRuntime + defaults
+        )
+    }
+
+    fun closeDownloadPicker() {
+        _uiState.value = _uiState.value.copy(
+            pendingDownloadRepoId = null,
+            downloadRuntimePickerVisible = false,
+            downloadRuntimeSelection = null
+        )
+    }
+
+    fun selectDownloadRuntime(runtime: ModelRuntime) {
+        _uiState.value = _uiState.value.copy(downloadRuntimeSelection = runtime)
+    }
+
+    fun selectDownloadVariant(runtime: ModelRuntime, variantId: String) {
+        _uiState.value = _uiState.value.copy(
+            downloadVariantSelectionByRuntime = _uiState.value.downloadVariantSelectionByRuntime.toMutableMap().apply {
+                put(runtime, variantId)
             }
         )
     }
 
-    fun startDownload(model: CatalogModel) {
-        val selectedVariantId = _uiState.value.selectedVariantByModel[key(model)] ?: model.variants.firstOrNull()?.variantId ?: return
-        val selectedVariant = model.variants.firstOrNull { it.variantId == selectedVariantId } ?: return
+    fun confirmDownloadSelection() {
+        val repoId = _uiState.value.pendingDownloadRepoId ?: return
+        val repo = findRepo(repoId) ?: return
+        val runtime = _uiState.value.downloadRuntimeSelection ?: repo.supportedRuntimes.firstOrNull() ?: return
+        val runtimeOption = repo.runtimeOptions[runtime] ?: return
+        val selectedVariantId = _uiState.value.downloadVariantSelectionByRuntime[runtime]
+            ?: runtimeOption.variants.firstOrNull()?.variantId
+            ?: return
+        val selectedVariant = runtimeOption.variants.firstOrNull { it.variantId == selectedVariantId } ?: return
+
         val isInstalled = _uiState.value.installed.any {
-            it.id == model.id && it.runtime == model.runtime && it.variant == selectedVariantId
+            it.id == repo.id && it.runtime == runtime && it.variant == selectedVariantId
         }
         if (isInstalled) {
-            setModelMessage(model.runtime, model.id, "Model already downloaded for $selectedVariantId")
+            setModelMessage(runtime, repo.id, "Model already downloaded for $selectedVariantId")
             _effects.tryEmit(AppUiEffect.ShowMessage("Model already downloaded"))
+            closeDownloadPicker()
             return
         }
 
@@ -233,51 +290,59 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         if (storageVerdict == FitVerdict.BLOCK || ramVerdict == FitVerdict.BLOCK) {
             setModelMessage(
-                model.runtime,
-                model.id,
+                runtime,
+                repo.id,
                 "This model is likely too large for current device resources. Try a smaller variant/model."
             )
             _effects.tryEmit(AppUiEffect.ShowMessage("Model may not fit this device"))
             return
         }
 
-        clearModelMessage(model.runtime, model.id)
+        clearModelMessage(runtime, repo.id)
         when (val result = installUseCase.enqueueDownload(
             context = appContext,
-            runtime = model.runtime,
-            modelId = model.id,
+            runtime = runtime,
+            modelId = repo.id,
             variant = selectedVariant
         )) {
             is AppResult.Success -> {
-                setModelMessage(model.runtime, model.id, "Download started: $selectedVariantId")
+                setModelMessage(runtime, repo.id, "Download started: $selectedVariantId")
                 _effects.tryEmit(AppUiEffect.ShowMessage("Download started"))
+                closeDownloadPicker()
             }
+
             is AppResult.Error -> {
-                setModelMessage(model.runtime, model.id, result.message)
+                setModelMessage(runtime, repo.id, result.message)
                 _effects.tryEmit(AppUiEffect.ShowMessage(result.message))
             }
         }
     }
 
-    fun pauseDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
+    fun pauseDownload(repoId: String, runtime: ModelRuntime) {
+        val task = _uiState.value.downloads.values.firstOrNull {
+            it.request.modelId == repoId && it.request.runtime == runtime
+        } ?: return
         viewModelScope.launch {
             DownloadCoordinator.pause(task.request)
-            setModelMessage(model.runtime, model.id, "Paused: ${task.request.variant}")
+            setModelMessage(runtime, repoId, "Paused: ${task.request.variant}")
         }
     }
 
-    fun resumeDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
+    fun resumeDownload(repoId: String, runtime: ModelRuntime) {
+        val task = _uiState.value.downloads.values.firstOrNull {
+            it.request.modelId == repoId && it.request.runtime == runtime
+        } ?: return
         DownloadCoordinator.resume(appContext, task.request)
-        setModelMessage(model.runtime, model.id, "Resumed: ${task.request.variant}")
+        setModelMessage(runtime, repoId, "Resumed: ${task.request.variant}")
     }
 
-    fun stopDownload(model: CatalogModel) {
-        val task = _uiState.value.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime } ?: return
+    fun stopDownload(repoId: String, runtime: ModelRuntime) {
+        val task = _uiState.value.downloads.values.firstOrNull {
+            it.request.modelId == repoId && it.request.runtime == runtime
+        } ?: return
         viewModelScope.launch {
             DownloadCoordinator.cancel(task.request)
-            setModelMessage(model.runtime, model.id, "Stopped: ${task.request.variant}")
+            setModelMessage(runtime, repoId, "Stopped: ${task.request.variant}")
         }
     }
 
@@ -289,7 +354,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 put(runtime, modelId)
             },
             preferredRuntime = runtime,
-            selectedRuntimeFilter = runtime,
+            selectedRuntimeFilters = setOf(runtime),
             firstRun = false,
             statusMessage = "Default model set"
         )
@@ -435,6 +500,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 explicitUserRequest = explicitWeb,
                 explicitOffline = explicitOffline
             )
+            AppLogger.i(
+                "WebSearch gate decision=${gateResult.decision} reason=${gateResult.reason} " +
+                    "webAllowed=${_uiState.value.webSearchEnabled && _uiState.value.webSearchAllowed} " +
+                    "explicitWeb=$explicitWeb explicitOffline=$explicitOffline promptLen=${prompt.length}"
+            )
             _uiState.value = _uiState.value.copy(
                 webSearchDecision = gateResult.decision,
                 webSearchSuggestionVisible = gateResult.decision == WebSearchDecision.SUGGEST
@@ -447,18 +517,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 when (val searchResult = webSearchProvider.search(prompt, limit = 3)) {
                     is AppResult.Success -> {
                         sourcesForMessage = searchResult.value
+                        AppLogger.i("WebSearch provider success: sources=${sourcesForMessage.size}")
                         if (sourcesForMessage.isNotEmpty()) {
                             promptForInference = GroundedPromptBuilder.build(prompt, sourcesForMessage)
+                            AppLogger.i("WebSearch grounded prompt enabled")
                         } else {
                             _uiState.value = _uiState.value.copy(searchError = "No relevant web results found.")
+                            AppLogger.i("WebSearch returned empty sources")
                         }
                     }
 
                     is AppResult.Error -> {
                         _uiState.value = _uiState.value.copy(searchError = searchResult.message)
+                        AppLogger.e("WebSearch provider error: ${searchResult.message}")
                     }
                 }
                 _uiState.value = _uiState.value.copy(webSearchInFlight = false)
+            } else {
+                AppLogger.i("WebSearch skipped for this prompt")
             }
             attachSourcesToLastAssistant(sourcesForMessage)
             _uiState.value = _uiState.value.copy(lastSources = sourcesForMessage)

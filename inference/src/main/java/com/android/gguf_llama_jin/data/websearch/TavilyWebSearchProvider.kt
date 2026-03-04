@@ -1,5 +1,6 @@
 package com.android.gguf_llama_jin.data.websearch
 
+import com.android.gguf_llama_jin.core.AppLogger
 import com.android.gguf_llama_jin.inference_module.BuildConfig
 import com.android.gguf_llama_jin.core.AppResult
 import kotlinx.coroutines.Dispatchers
@@ -21,10 +22,12 @@ class TavilyWebSearchProvider(
 
     override suspend fun search(query: String, limit: Int): AppResult<List<WebSearchHit>> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
+            AppLogger.e("Tavily search skipped: missing API key")
             return@withContext AppResult.Error("Missing Tavily API key")
         }
 
         val safeLimit = limit.coerceIn(1, 5)
+        AppLogger.i("Tavily search start: endpoint=$endpoint queryLen=${query.length} limit=$safeLimit")
         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8_000
@@ -53,17 +56,23 @@ class TavilyWebSearchProvider(
                 ?.bufferedReader()
                 ?.use { it.readText() }
                 .orEmpty()
+            AppLogger.i("Tavily search HTTP response: code=$code bodyLen=${body.length}")
 
             if (code !in 200..299) {
+                AppLogger.e("Tavily search failed with HTTP $code")
                 AppResult.Error("Web search failed: HTTP $code")
             } else {
                 try {
-                    AppResult.Success(mapResponse(body, safeLimit))
-                } catch (_: Throwable) {
+                    val mapped = mapResponse(body, safeLimit)
+                    AppLogger.i("Tavily search success: hits=${mapped.size}")
+                    AppResult.Success(mapped)
+                } catch (t: Throwable) {
+                    AppLogger.e("Tavily search parse error", t)
                     AppResult.Error("Web search parse error")
                 }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            AppLogger.e("Tavily search request failed", t)
             AppResult.Error("Web search request failed")
         } finally {
             conn.disconnect()

@@ -26,7 +26,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -212,7 +211,7 @@ private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: 
             Text(model.displayName, fontWeight = FontWeight.Bold)
             Text("Params: ${model.paramsApprox} | Tier: ${model.recommendedTier}")
             Text(model.repo)
-            if (model.runtime == ModelRuntime.ONNX_RUNTIME) {
+            if (model.runtime == ModelRuntime.ONNX) {
                 val fileCount = selected.metadata["files"] ?: selected.downloadFiles.size.toString()
                 Text("Package files: $fileCount")
             }
@@ -285,11 +284,11 @@ private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: 
 private fun RuntimeBadge(runtime: ModelRuntime) {
     val containerColor = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.tertiaryContainer
-        ModelRuntime.ONNX_RUNTIME -> MaterialTheme.colorScheme.secondaryContainer
+        ModelRuntime.ONNX -> MaterialTheme.colorScheme.secondaryContainer
     }
     val contentColor = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.onTertiaryContainer
-        ModelRuntime.ONNX_RUNTIME -> MaterialTheme.colorScheme.onSecondaryContainer
+        ModelRuntime.ONNX -> MaterialTheme.colorScheme.onSecondaryContainer
     }
     Surface(
         shape = RoundedCornerShape(999.dp),

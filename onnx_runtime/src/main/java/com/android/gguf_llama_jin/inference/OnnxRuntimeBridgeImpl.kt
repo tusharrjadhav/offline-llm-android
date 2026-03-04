@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.flowOn
 import java.io.File
 
 class OnnxRuntimeBridgeImpl : LlmRuntimeBridge {
-    override val runtime: ModelRuntime = ModelRuntime.ONNX_RUNTIME
+    override val runtime: ModelRuntime = ModelRuntime.ONNX
 
     private var env: OrtEnvironment? = null
     private val sessions = mutableMapOf<Long, OrtSession>()

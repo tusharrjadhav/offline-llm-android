@@ -31,10 +31,10 @@ fun RuntimeFilterRow(selected: ModelRuntime, onSelect: (ModelRuntime) -> Unit) {
             }
         )
         AssistChip(
-            onClick = { onSelect(ModelRuntime.ONNX_RUNTIME) },
+            onClick = { onSelect(ModelRuntime.ONNX) },
             label = { Text("ONNX") },
             trailingIcon = {
-                if (selected == ModelRuntime.ONNX_RUNTIME) {
+                if (selected == ModelRuntime.ONNX) {
                     Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
                 }
             }
@@ -49,7 +49,7 @@ fun RuntimeChip(runtime: ModelRuntime) {
 
 fun ModelRuntime.label(): String = when (this) {
     ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
-    ModelRuntime.ONNX_RUNTIME -> "ONNX"
+    ModelRuntime.ONNX -> "ONNX"
 }
 
 fun formatFileSize(sizeBytes: Long): String {

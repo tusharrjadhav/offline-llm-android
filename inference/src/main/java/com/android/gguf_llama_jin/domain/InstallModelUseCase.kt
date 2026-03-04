@@ -28,7 +28,7 @@ class InstallModelUseCase(
         val files = variant.downloadFiles.map { remote ->
             val target = when (runtime) {
                 ModelRuntime.LLAMA_CPP_GGUF -> File(rootModelDir, "${safeModelId}-${variant.variantId}.gguf")
-                ModelRuntime.ONNX_RUNTIME -> {
+                ModelRuntime.ONNX -> {
                     val runtimeDir = File(rootModelDir, "onnx/$safeModelId/${variant.variantId}")
                     runtimeDir.mkdirs()
                     File(runtimeDir, remote.fileName.substringAfterLast('/'))

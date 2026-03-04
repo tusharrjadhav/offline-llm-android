@@ -27,7 +27,7 @@ class HuggingFaceGgufModelSource(
 class HuggingFaceOnnxModelSource(
     private val api: HfCatalogApi = HfCatalogApi()
 ) : ModelSource {
-    override val runtime: ModelRuntime = ModelRuntime.ONNX_RUNTIME
+    override val runtime: ModelRuntime = ModelRuntime.ONNX
     override suspend fun fetchCatalog(): AppResult<List<CatalogModel>> = api.searchOnnxModels()
 }
 
@@ -194,7 +194,7 @@ class HfCatalogApi {
             id = modelId,
             displayName = display,
             repo = modelId,
-            runtime = ModelRuntime.ONNX_RUNTIME,
+            runtime = ModelRuntime.ONNX,
             paramsApprox = estimateParamSize(display),
             tags = tags,
             license = if (obj.has("license") && !obj.isNull("license")) obj.optString("license") else null,

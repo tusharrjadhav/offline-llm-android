@@ -13,13 +13,13 @@ class AppSettings(private val context: Context) {
 
     fun defaultModelId(runtime: ModelRuntime): String? = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> prefs().getString(KEY_DEFAULT_MODEL_ID_LLAMA, null)
-        ModelRuntime.ONNX_RUNTIME -> prefs().getString(KEY_DEFAULT_MODEL_ID_ONNX, null)
+        ModelRuntime.ONNX -> prefs().getString(KEY_DEFAULT_MODEL_ID_ONNX, null)
     }
 
     fun setDefaultModelId(runtime: ModelRuntime, value: String?) {
         val key = when (runtime) {
             ModelRuntime.LLAMA_CPP_GGUF -> KEY_DEFAULT_MODEL_ID_LLAMA
-            ModelRuntime.ONNX_RUNTIME -> KEY_DEFAULT_MODEL_ID_ONNX
+            ModelRuntime.ONNX -> KEY_DEFAULT_MODEL_ID_ONNX
         }
         prefs().edit().putString(key, value).apply()
     }

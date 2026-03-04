@@ -5,16 +5,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.android.gguf_llama_jin.core.AppLogger
 import com.android.gguf_llama_jin.core.AppResult
-import com.android.gguf_llama_jin.core.CapabilitySnapshot
 import com.android.gguf_llama_jin.core.Constants
 import com.android.gguf_llama_jin.core.DeviceHeuristics
 import com.android.gguf_llama_jin.core.FitVerdict
 import com.android.gguf_llama_jin.core.ModelRuntime
 import com.android.gguf_llama_jin.data.catalog.CatalogModel
-import com.android.gguf_llama_jin.data.catalog.ModelVariant
 import com.android.gguf_llama_jin.data.download.DownloadCoordinator
 import com.android.gguf_llama_jin.data.download.DownloadState
-import com.android.gguf_llama_jin.data.download.DownloadTaskState
 import com.android.gguf_llama_jin.data.download.id
 import com.android.gguf_llama_jin.data.modelstore.AppSettings
 import com.android.gguf_llama_jin.data.modelstore.InstalledModel
@@ -36,64 +33,15 @@ import com.android.gguf_llama_jin.inference.SamplingParams
 import com.android.gguf_llama_jin.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-
-data class ChatMessage(
-    val role: String,
-    val text: String,
-    val sources: List<WebSearchHit> = emptyList()
-)
-
-data class ChatThread(
-    val id: String,
-    val title: String,
-    val messages: List<ChatMessage>,
-    val updatedAt: Long
-)
-
-data class ChatUiMeta(
-    val activeThreadId: String? = null,
-    val modelPickerVisible: Boolean = false
-)
-
-data class AppUiState(
-    val loadingCatalog: Boolean = false,
-    val catalog: List<CatalogModel> = emptyList(),
-    val selectedRuntimeFilter: ModelRuntime = ModelRuntime.LLAMA_CPP_GGUF,
-    val preferredRuntime: ModelRuntime = ModelRuntime.LLAMA_CPP_GGUF,
-    val installed: List<InstalledModel> = emptyList(),
-    val downloads: Map<String, DownloadTaskState> = emptyMap(),
-    val selectedModelByRuntime: Map<ModelRuntime, String?> = emptyMap(),
-    val selectedVariantByModel: Map<String, String> = emptyMap(),
-    val modelMessages: Map<String, String> = emptyMap(),
-    val threads: List<ChatThread> = emptyList(),
-    val chatMeta: ChatUiMeta = ChatUiMeta(),
-    val firstRun: Boolean = true,
-    val capabilitySnapshot: CapabilitySnapshot? = null,
-    val generating: Boolean = false,
-    val chatInput: String = "",
-    val statusMessage: String? = null,
-    val telemetryEnabled: Boolean = false,
-    val historyEnabled: Boolean = true,
-    val wifiOnly: Boolean = true,
-    val webSearchAllowed: Boolean = false,
-    val webSearchEnabled: Boolean = false,
-    val webSearchInFlight: Boolean = false,
-    val webSearchDecision: WebSearchDecision? = null,
-    val webSearchSuggestionVisible: Boolean = false,
-    val lastSources: List<WebSearchHit> = emptyList(),
-    val searchError: String? = null,
-    val ttftMs: Long? = null,
-    val tokensPerSec: Double? = null
-) {
-    val activeThread: ChatThread?
-        get() = threads.firstOrNull { it.id == chatMeta.activeThreadId }
-}
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = getApplication<Application>()
@@ -113,7 +61,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(
         AppUiState(
             firstRun = settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF) == null &&
-                settings.defaultModelId(ModelRuntime.ONNX_RUNTIME) == null,
+                settings.defaultModelId(ModelRuntime.ONNX) == null,
             capabilitySnapshot = DeviceHeuristics.snapshot(appContext),
             telemetryEnabled = telemetry.isEnabled(),
             historyEnabled = settings.chatHistoryEnabled(),
@@ -124,11 +72,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             selectedRuntimeFilter = settings.preferredRuntime(),
             selectedModelByRuntime = mapOf(
                 ModelRuntime.LLAMA_CPP_GGUF to settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF),
-                ModelRuntime.ONNX_RUNTIME to settings.defaultModelId(ModelRuntime.ONNX_RUNTIME)
+                ModelRuntime.ONNX to settings.defaultModelId(ModelRuntime.ONNX)
             )
         )
     )
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+    private val _effects = MutableSharedFlow<AppUiEffect>(extraBufferCapacity = 16)
+    val effects: SharedFlow<AppUiEffect> = _effects.asSharedFlow()
 
     private var generationJob: Job? = null
 
@@ -147,7 +97,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                     ?: task.request.files.firstOrNull()
                                     ?: return@forEach
                                 val size = task.request.files.sumOf { f -> File(f.targetPath).takeIf { it.exists() }?.length() ?: 0L }
-                                val assetDir = if (task.request.runtime == ModelRuntime.ONNX_RUNTIME) {
+                                val assetDir = if (task.request.runtime == ModelRuntime.ONNX) {
                                     File(modelFile.targetPath).parentFile?.absolutePath
                                 } else null
                                 installUseCase.markInstalled(
@@ -182,6 +132,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadInstalled()
     }
 
+    fun onEvent(event: AppUiEvent) {
+        when (event) {
+            is AppUiEvent.SetCatalogRuntimeFilter -> setCatalogRuntimeFilter(event.runtime)
+            is AppUiEvent.SetPreferredRuntime -> setPreferredRuntime(event.runtime)
+            is AppUiEvent.SetVariant -> setVariant(event.model, event.variant)
+            is AppUiEvent.StartDownload -> startDownload(event.model)
+            is AppUiEvent.PauseDownload -> pauseDownload(event.model)
+            is AppUiEvent.ResumeDownload -> resumeDownload(event.model)
+            is AppUiEvent.StopDownload -> stopDownload(event.model)
+            is AppUiEvent.ChooseDefaultModel -> chooseDefaultModel(event.runtime, event.modelId)
+            is AppUiEvent.SetChatInput -> setChatInput(event.value)
+            is AppUiEvent.ToggleWebSearchAllowed -> toggleWebSearchAllowed(event.enabled)
+            AppUiEvent.DisableWebSearchForNextSends -> disableWebSearchForNextSends()
+            AppUiEvent.EnableWebSearchForNextSends -> enableWebSearchForNextSends()
+            AppUiEvent.ClearSearchError -> clearSearchError()
+            AppUiEvent.CreateNewThread -> createNewThread()
+            is AppUiEvent.SelectThread -> selectThread(event.threadId)
+            AppUiEvent.ShowModelPicker -> showModelPicker()
+            AppUiEvent.HideModelPicker -> hideModelPicker()
+            is AppUiEvent.AppendUserMessage -> appendUserMessage(event.text)
+            is AppUiEvent.AppendAssistantToken -> appendAssistantToken(event.token)
+            AppUiEvent.FinalizeAssistantMessage -> finalizeAssistantMessage()
+            is AppUiEvent.SendPrompt -> sendPrompt(event.forceWebSearch)
+            AppUiEvent.StopGeneration -> stopGeneration()
+            is AppUiEvent.ToggleTelemetry -> toggleTelemetry(event.enabled)
+            is AppUiEvent.ToggleHistory -> toggleHistory(event.enabled)
+            is AppUiEvent.ToggleWifiOnly -> toggleWifiOnly(event.enabled)
+            AppUiEvent.ClearStatus -> clearStatus()
+            AppUiEvent.RefreshCatalog -> refreshCatalog()
+        }
+    }
+
     fun setCatalogRuntimeFilter(runtime: ModelRuntime) {
         _uiState.value = _uiState.value.copy(selectedRuntimeFilter = runtime)
         settings.setPreferredRuntime(runtime)
@@ -202,7 +184,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val defaults = result.value.associate { model ->
                         val preferred = when (model.runtime) {
                             ModelRuntime.LLAMA_CPP_GGUF -> model.variants.firstOrNull { it.variantId == Constants.DEFAULT_QUANT }?.variantId
-                            ModelRuntime.ONNX_RUNTIME -> model.variants.firstOrNull()?.variantId
+                            ModelRuntime.ONNX -> model.variants.firstOrNull()?.variantId
                         } ?: model.variants.firstOrNull()?.variantId ?: "default"
                         key(model) to preferred
                     }
@@ -218,6 +200,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         loadingCatalog = false,
                         statusMessage = result.message
                     )
+                    _effects.tryEmit(AppUiEffect.ShowMessage(result.message))
                 }
             }
         }
@@ -239,6 +222,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (isInstalled) {
             setModelMessage(model.runtime, model.id, "Model already downloaded for $selectedVariantId")
+            _effects.tryEmit(AppUiEffect.ShowMessage("Model already downloaded"))
             return
         }
 
@@ -253,6 +237,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 model.id,
                 "This model is likely too large for current device resources. Try a smaller variant/model."
             )
+            _effects.tryEmit(AppUiEffect.ShowMessage("Model may not fit this device"))
             return
         }
 
@@ -263,8 +248,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             modelId = model.id,
             variant = selectedVariant
         )) {
-            is AppResult.Success -> setModelMessage(model.runtime, model.id, "Download started: $selectedVariantId")
-            is AppResult.Error -> setModelMessage(model.runtime, model.id, result.message)
+            is AppResult.Success -> {
+                setModelMessage(model.runtime, model.id, "Download started: $selectedVariantId")
+                _effects.tryEmit(AppUiEffect.ShowMessage("Download started"))
+            }
+            is AppResult.Error -> {
+                setModelMessage(model.runtime, model.id, result.message)
+                _effects.tryEmit(AppUiEffect.ShowMessage(result.message))
+            }
         }
     }
 
@@ -415,6 +406,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Install and select a model first for ${runtime.name}",
                 chatMeta = _uiState.value.chatMeta.copy(modelPickerVisible = true)
             )
+            _effects.tryEmit(AppUiEffect.ShowMessage("Select an installed model first"))
             AppLogger.e("sendPrompt blocked: no installed model selected. runtime=$runtime selectedModelId=$modelId")
             return
         }
@@ -489,6 +481,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = "Failed to open inference session",
                     webSearchInFlight = false
                 )
+                _effects.tryEmit(AppUiEffect.ShowMessage("Failed to open inference session"))
                 AppLogger.e("inference session start failed modelPath=${installedModel.path}")
                 return@launch
             }

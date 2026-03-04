@@ -14,7 +14,7 @@ class ModelCatalogUseCase(
     suspend fun execute(runtime: ModelRuntime?): AppResult<List<CatalogModel>> {
         val sources = when (runtime) {
             ModelRuntime.LLAMA_CPP_GGUF -> listOf(ggufSource)
-            ModelRuntime.ONNX_RUNTIME -> listOf(onnxSource)
+            ModelRuntime.ONNX -> listOf(onnxSource)
             null -> listOf(ggufSource, onnxSource)
         }
 

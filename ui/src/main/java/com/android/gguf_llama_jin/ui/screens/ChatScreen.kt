@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
@@ -324,7 +323,7 @@ private fun ModelPickerBottomSheet(
             )
             RuntimeSection(
                 title = "ONNX",
-                runtime = ModelRuntime.ONNX_RUNTIME,
+                runtime = ModelRuntime.ONNX,
                 state = state,
                 viewModel = viewModel
             )

@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.android.gguf_llama_jin.core.ModelRuntime
 import com.android.gguf_llama_jin.data.catalog.CatalogModel
+import com.android.gguf_llama_jin.data.catalog.ModelVariant
 import com.android.gguf_llama_jin.data.download.DownloadState
 import com.android.gguf_llama_jin.ui.viewmodel.AppUiState
 import com.android.gguf_llama_jin.ui.viewmodel.AppViewModel
@@ -154,9 +155,9 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                RuntimeBadge(runtime)
                                 Text(installed.id, fontWeight = FontWeight.Bold)
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    RuntimeChip(runtime)
                                     AssistChip(onClick = {}, label = { Text(installed.variant) })
                                 }
                                 Text("Size: ${formatFileSize(installed.sizeBytes)}")
@@ -197,19 +198,18 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
 
 @Composable
 private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: AppViewModel) {
+    val variants = modelVariantsForUi(model)
     val variantKey = "${model.runtime.name}:${model.id}"
-    val selectedVariant = state.selectedVariantByModel[variantKey] ?: model.variants.firstOrNull()?.variantId.orEmpty()
-    val selected = model.variants.firstOrNull { it.variantId == selectedVariant } ?: model.variants.firstOrNull() ?: return
+    val selectedVariant = state.selectedVariantByModel[variantKey] ?: variants.firstOrNull()?.variantId.orEmpty()
+    val selected = variants.firstOrNull { it.variantId == selectedVariant } ?: variants.firstOrNull() ?: return
     val task = state.downloads.values.firstOrNull { it.request.modelId == model.id && it.request.runtime == model.runtime }
     val isInstalled = state.installed.any { it.id == model.id && it.runtime == model.runtime && it.variant == selected.variantId }
     val message = state.modelMessages["${model.runtime.name}:${model.id}"]
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(model.displayName, fontWeight = FontWeight.Bold)
-                RuntimeChip(model.runtime)
-            }
+            RuntimeBadge(model.runtime)
+            Text(model.displayName, fontWeight = FontWeight.Bold)
             Text("Params: ${model.paramsApprox} | Tier: ${model.recommendedTier}")
             Text(model.repo)
             if (model.runtime == ModelRuntime.ONNX_RUNTIME) {
@@ -221,7 +221,7 @@ private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: 
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                model.variants.forEach { variant ->
+                variants.forEach { variant ->
                     AssistChip(
                         onClick = { viewModel.setVariant(model, variant.variantId) },
                         label = { Text(if (selected.variantId == variant.variantId) "${variant.variantId} *" else variant.variantId) }
@@ -279,4 +279,47 @@ private fun CatalogModelCard(model: CatalogModel, state: AppUiState, viewModel: 
             }
         }
     }
+}
+
+@Composable
+private fun RuntimeBadge(runtime: ModelRuntime) {
+    val containerColor = when (runtime) {
+        ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.tertiaryContainer
+        ModelRuntime.ONNX_RUNTIME -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    val contentColor = when (runtime) {
+        ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.onTertiaryContainer
+        ModelRuntime.ONNX_RUNTIME -> MaterialTheme.colorScheme.onSecondaryContainer
+    }
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = containerColor
+    ) {
+        Text(
+            text = runtime.label(),
+            color = contentColor,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+        )
+    }
+}
+
+private fun modelVariantsForUi(model: CatalogModel): List<ModelVariant> {
+    val invalidTags = setOf("", "UNKNOWN", "ERROR", "N/A", "NA", "NULL", "NONE")
+    val seen = mutableSetOf<String>()
+    val cleaned = model.variants.mapNotNull { variant ->
+        val raw = variant.variantId.trim()
+        val normalized = raw.uppercase()
+        if (normalized in invalidTags) return@mapNotNull null
+        if (model.runtime == ModelRuntime.LLAMA_CPP_GGUF && normalized == "GGUF") return@mapNotNull null
+        if (!seen.add(normalized)) return@mapNotNull null
+        variant
+    }
+    if (cleaned.isNotEmpty()) return cleaned
+
+    val fallback = model.variants.firstOrNull {
+        val normalized = it.variantId.trim().uppercase()
+        normalized.isNotBlank() && normalized !in invalidTags
+    }
+    return fallback?.let(::listOf) ?: emptyList()
 }

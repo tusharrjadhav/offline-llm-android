@@ -4,6 +4,14 @@ import com.android.gguf_llama_jin.core.AppLogger
 import com.android.gguf_llama_jin.core.AppResult
 import com.android.gguf_llama_jin.core.Constants
 import com.android.gguf_llama_jin.core.ModelRuntime
+import com.android.gguf_llama_jin.data.catalog.dto.HfModelDetailsDto
+import com.android.gguf_llama_jin.data.catalog.dto.HfModelListItemDto
+import com.android.gguf_llama_jin.data.network.AppHttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.client.request.parameter
+import io.ktor.client.request.url
+import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -11,11 +19,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URLEncoder
-import java.net.URL
 import java.util.Locale
 
 class HfCatalogApi {
@@ -27,61 +30,35 @@ class HfCatalogApi {
             val selected = runtimes.ifEmpty {
                 setOf(ModelRuntime.LLAMA_CPP_GGUF, ModelRuntime.ONNX)
             }
-            val libraries = selected.map {
-                when (it) {
-                    ModelRuntime.LLAMA_CPP_GGUF -> "gguf"
-                    ModelRuntime.ONNX -> "onnx"
-                }
-            }.toSet().sorted()
+            val filters = selected.map { it.toHfFilter() }.toSet().sorted()
             val pipelineTag = "text-generation"
             val normalizedLimit = limit.coerceAtLeast(24)
-            AppLogger.i("HF catalog search start runtimes=$selected filters=$libraries limit=$normalizedLimit")
+            AppLogger.i("HF catalog search start runtimes=$selected filters=$filters limit=$normalizedLimit")
 
             val modelIds = linkedSetOf<String>()
-
-            val queryUrl = modelsApiUrlWithFilter(
-                filters = libraries.toSet(),
-                limit = normalizedLimit,
-                pipelineTag = pipelineTag
-            )
-            val multiSearchIds = extractModelIds(getJsonArray(queryUrl))
-            AppLogger.i("HF catalog ids filters=$libraries pipeline=$pipelineTag full=true url=$queryUrl count=${multiSearchIds.size}")
-            modelIds += multiSearchIds
+            val firstPass = requestModelIds(filters.toSet(), normalizedLimit, pipelineTag)
+            AppLogger.i("HF catalog ids filters=$filters pipeline=$pipelineTag full=true count=${firstPass.size}")
+            modelIds += firstPass
 
             if (modelIds.isEmpty()) {
-                libraries.forEach { library ->
-                    val perFilterUrl = modelsApiUrlWithFilter(
-                        filters = setOf(library),
-                        limit = normalizedLimit,
-                        pipelineTag = pipelineTag
-                    )
-                    val ids = extractModelIds(getJsonArray(perFilterUrl))
-                    AppLogger.i("HF catalog ids filter=$library pipeline=$pipelineTag full=true url=$perFilterUrl count=${ids.size}")
+                filters.forEach { filter ->
+                    val ids = requestModelIds(setOf(filter), normalizedLimit, pipelineTag)
+                    AppLogger.i("HF catalog ids filter=$filter pipeline=$pipelineTag full=true count=${ids.size}")
                     modelIds += ids
                 }
             }
 
             if (modelIds.isEmpty()) {
                 AppLogger.i("HF catalog pipeline-filtered fetch returned empty, retrying without pipeline_tag")
-                val noPipelineUrl = modelsApiUrlWithFilter(
-                    filters = libraries.toSet(),
-                    limit = normalizedLimit,
-                    pipelineTag = null
-                )
-                val ids = extractModelIds(getJsonArray(noPipelineUrl))
-                AppLogger.i("HF catalog ids filters=$libraries pipeline=<none> full=true url=$noPipelineUrl count=${ids.size}")
+                val ids = requestModelIds(filters.toSet(), normalizedLimit, null)
+                AppLogger.i("HF catalog ids filters=$filters pipeline=<none> full=true count=${ids.size}")
                 modelIds += ids
             }
 
             if (modelIds.isEmpty()) {
-                libraries.forEach { library ->
-                    val perFilterNoPipelineUrl = modelsApiUrlWithFilter(
-                        filters = setOf(library),
-                        limit = normalizedLimit,
-                        pipelineTag = null
-                    )
-                    val ids = extractModelIds(getJsonArray(perFilterNoPipelineUrl))
-                    AppLogger.i("HF catalog ids filter=$library pipeline=<none> full=true url=$perFilterNoPipelineUrl count=${ids.size}")
+                filters.forEach { filter ->
+                    val ids = requestModelIds(setOf(filter), normalizedLimit, null)
+                    AppLogger.i("HF catalog ids filter=$filter pipeline=<none> full=true count=${ids.size}")
                     modelIds += ids
                 }
             }
@@ -104,18 +81,10 @@ class HfCatalogApi {
     suspend fun searchModels(runtime: ModelRuntime, limit: Int = 16): AppResult<List<CatalogRuntimeModel>> = withContext(Dispatchers.IO) {
         try {
             val normalizedLimit = limit.coerceAtLeast(24)
-            val filter = when (runtime) {
-                ModelRuntime.LLAMA_CPP_GGUF -> "gguf"
-                ModelRuntime.ONNX -> "onnx"
-            }
+            val filter = runtime.toHfFilter()
             val pipelineTag = if (runtime == ModelRuntime.ONNX) "text-generation" else null
 
-            val byLibrary = modelsApiUrlWithFilter(
-                filters = setOf(filter),
-                limit = normalizedLimit,
-                pipelineTag = pipelineTag
-            )
-            val modelIds = extractModelIds(getJsonArray(byLibrary)).distinct()
+            val modelIds = requestModelIds(setOf(filter), normalizedLimit, pipelineTag).distinct()
             val semaphore = Semaphore(4)
             val models = coroutineScope {
                 modelIds.map { modelId ->
@@ -137,58 +106,55 @@ class HfCatalogApi {
         }
     }
 
-    private fun extractModelIds(json: JSONArray): List<String> {
-        val modelIds = mutableListOf<String>()
-        for (i in 0 until json.length()) {
-            val modelObj = json.optJSONObject(i) ?: continue
-            val modelId = modelObj.optString("id")
-            if (modelId.isNotBlank()) modelIds += modelId
-        }
-        return modelIds
-    }
-
-    private fun modelsApiUrlWithFilter(
+    private suspend fun requestModelIds(
         filters: Set<String>,
         limit: Int,
-        pipelineTag: String? = null
-    ): String {
-        val query = mutableListOf(
-            "filter=${encodeQuery(filters.joinToString(","))}",
-            "sort=downloads",
-            "direction=-1",
-            "limit=$limit",
-            "full=true"
-        )
-        if (!pipelineTag.isNullOrBlank()) query += "pipeline_tag=${encodeQuery(pipelineTag)}"
-        return "${Constants.HF_API_BASE}/models?${query.joinToString("&")}"
+        pipelineTag: String?
+    ): List<String> {
+        val response = AppHttpClient.client.get {
+            url("${Constants.HF_API_BASE}/models")
+            parameter("filter", filters.joinToString(","))
+            parameter("sort", "downloads")
+            parameter("direction", "-1")
+            parameter("limit", limit)
+            parameter("full", "true")
+            if (!pipelineTag.isNullOrBlank()) parameter("pipeline_tag", pipelineTag)
+        }
+        if (response.status.value !in 200..299) {
+            val body = response.bodyAsText().take(180)
+            throw IllegalStateException("HTTP ${response.status.value} ${response.status.description}. $body")
+        }
+        val payload = response.body<List<HfModelListItemDto>>()
+        return payload.mapNotNull { it.id?.takeIf(String::isNotBlank) }
     }
 
-    private fun encodeQuery(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
+    private suspend fun requestModelDetails(modelId: String): HfModelDetailsDto {
+        val response = AppHttpClient.client.get {
+            url("${Constants.HF_API_BASE}/models/$modelId")
+        }
+        if (response.status.value !in 200..299) {
+            val body = response.bodyAsText().take(180)
+            throw IllegalStateException("HTTP ${response.status.value} ${response.status.description}. $body")
+        }
+        return response.body()
+    }
 
     private suspend fun fetchRepoModelDetails(
         modelId: String,
         runtimes: Set<ModelRuntime>
     ): CatalogRepoModel? = withContext(Dispatchers.IO) {
-        val obj = getJsonObject("${Constants.HF_API_BASE}/models/$modelId")
-        val tags = extractTags(obj)
+        val details = requestModelDetails(modelId)
+        val tags = details.tags.filter { it.isNotBlank() }
 
-        val siblings = obj.optJSONArray("siblings") ?: JSONArray()
         val runtimeOptions = mutableMapOf<ModelRuntime, RuntimeOption>()
 
         if (ModelRuntime.LLAMA_CPP_GGUF in runtimes) {
-            val variants = mutableListOf<ModelVariant>()
-            for (i in 0 until siblings.length()) {
-                val sibling = siblings.optJSONObject(i) ?: continue
-                val fileName = sibling.optString("rfilename")
-                if (!fileName.endsWith(".gguf", true)) continue
-                val lfs = sibling.optJSONObject("lfs")
-                val size = when {
-                    sibling.has("size") && !sibling.isNull("size") -> sibling.optLong("size", 0L)
-                    lfs != null && lfs.has("size") && !lfs.isNull("size") -> lfs.optLong("size", 0L)
-                    else -> 0L
-                }
-                val sha = if (lfs != null && lfs.has("sha256") && !lfs.isNull("sha256")) lfs.optString("sha256") else null
-                variants += ModelVariant(
+            val variants = details.siblings.mapNotNull { sibling ->
+                val fileName = sibling.fileName?.trim().orEmpty()
+                if (!fileName.endsWith(".gguf", true)) return@mapNotNull null
+                val size = sibling.size ?: sibling.lfs?.size ?: 0L
+                val sha = sibling.lfs?.sha256
+                ModelVariant(
                     variantId = extractQuant(fileName),
                     sizeBytes = size,
                     downloadFiles = listOf(
@@ -215,24 +181,24 @@ class HfCatalogApi {
             val allFiles = mutableListOf<RemoteFileRef>()
             var modelFile: RemoteFileRef? = null
             var hasTokenizerAsset = false
-            for (i in 0 until siblings.length()) {
-                val sibling = siblings.optJSONObject(i) ?: continue
-                val fileName = sibling.optString("rfilename")
+
+            details.siblings.forEach { sibling ->
+                val fileName = sibling.fileName?.trim().orEmpty()
+                if (fileName.isBlank()) return@forEach
                 val lower = fileName.lowercase(Locale.US)
-                val lfs = sibling.optJSONObject("lfs")
-                val size = when {
-                    sibling.has("size") && !sibling.isNull("size") -> sibling.optLong("size", 0L)
-                    lfs != null && lfs.has("size") && !lfs.isNull("size") -> lfs.optLong("size", 0L)
-                    else -> 0L
-                }
-                val sha = if (lfs != null && lfs.has("sha256") && !lfs.isNull("sha256")) lfs.optString("sha256") else null
+                val size = sibling.size ?: sibling.lfs?.size ?: 0L
+                val sha = sibling.lfs?.sha256
+
                 val role = when {
                     lower.endsWith(".onnx") -> RemoteFileRole.MODEL
                     lower.endsWith("tokenizer.json") || lower.endsWith("tokenizer.model") -> RemoteFileRole.TOKENIZER
-                    lower.endsWith("config.json") || lower.endsWith("generation_config.json") || lower.endsWith("tokenizer_config.json") -> RemoteFileRole.CONFIG
+                    lower.endsWith("config.json") ||
+                        lower.endsWith("generation_config.json") ||
+                        lower.endsWith("tokenizer_config.json") -> RemoteFileRole.CONFIG
                     else -> RemoteFileRole.OTHER
                 }
-                if (role == RemoteFileRole.OTHER) continue
+                if (role == RemoteFileRole.OTHER) return@forEach
+
                 val file = RemoteFileRef(
                     fileName = fileName,
                     downloadUrl = "https://huggingface.co/$modelId/resolve/main/$fileName",
@@ -246,6 +212,7 @@ class HfCatalogApi {
                     hasTokenizerAsset = true
                 }
             }
+
             if (modelFile != null && hasTokenizerAsset) {
                 val variant = ModelVariant(
                     variantId = "ONNX",
@@ -268,110 +235,91 @@ class HfCatalogApi {
             AppLogger.i("HF catalog skipping repo=$modelId no compatible files for runtimes=$runtimes")
             return@withContext null
         }
-        val display = modelId.substringAfterLast('/')
+
         CatalogRepoModel(
             id = modelId,
-            displayName = display,
+            displayName = modelId.substringAfterLast('/'),
             repo = modelId,
             paramsApprox = estimateParamSize(modelId, tags),
             tags = tags,
-            license = if (obj.has("license") && !obj.isNull("license")) obj.optString("license") else null,
+            license = details.license,
             runtimeOptions = runtimeOptions
         )
     }
 
     private suspend fun fetchGgufModelDetails(modelId: String): CatalogRuntimeModel? = withContext(Dispatchers.IO) {
-        val obj = getJsonObject("${Constants.HF_API_BASE}/models/$modelId")
-        val tags = extractTags(obj)
+        val details = requestModelDetails(modelId)
+        val tags = details.tags.filter { it.isNotBlank() }
         if (!tags.any { it.contains("instruct", true) || it.contains("chat", true) }) return@withContext null
 
-        val siblings = obj.optJSONArray("siblings") ?: JSONArray()
-        val variants = mutableListOf<ModelVariant>()
-        for (i in 0 until siblings.length()) {
-            val sibling = siblings.optJSONObject(i) ?: continue
-            val fileName = sibling.optString("rfilename")
-            if (!fileName.endsWith(".gguf", true)) continue
+        val variants = details.siblings.mapNotNull { sibling ->
+            val fileName = sibling.fileName?.trim().orEmpty()
+            if (!fileName.endsWith(".gguf", true)) return@mapNotNull null
 
-            val quant = extractQuant(fileName)
-            val lfs = sibling.optJSONObject("lfs")
-            val size = when {
-                sibling.has("size") && !sibling.isNull("size") -> sibling.optLong("size", 0L)
-                lfs != null && lfs.has("size") && !lfs.isNull("size") -> lfs.optLong("size", 0L)
-                else -> 0L
-            }
-            val sha = if (lfs != null && lfs.has("sha256") && !lfs.isNull("sha256")) lfs.optString("sha256") else null
+            val size = sibling.size ?: sibling.lfs?.size ?: 0L
             val file = RemoteFileRef(
                 fileName = fileName,
                 downloadUrl = "https://huggingface.co/$modelId/resolve/main/$fileName",
                 sizeBytes = size,
-                sha256 = sha,
+                sha256 = sibling.lfs?.sha256,
                 role = RemoteFileRole.MODEL
             )
-            variants += ModelVariant(
-                variantId = quant,
+            ModelVariant(
+                variantId = extractQuant(fileName),
                 sizeBytes = size,
                 downloadFiles = listOf(file)
             )
         }
 
         if (variants.isEmpty()) return@withContext null
-        val display = modelId.substringAfterLast('/')
+
         CatalogRuntimeModel(
             id = modelId,
-            displayName = display,
+            displayName = modelId.substringAfterLast('/'),
             repo = modelId,
             runtime = ModelRuntime.LLAMA_CPP_GGUF,
             paramsApprox = estimateParamSize(modelId, tags),
             tags = tags,
-            license = if (obj.has("license") && !obj.isNull("license")) obj.optString("license") else null,
+            license = details.license,
             variants = variants.sortedBy { it.sizeBytes },
             recommendedTier = recommendTierFromSize(variants.minOf { it.sizeBytes })
         )
     }
 
     private suspend fun fetchOnnxModelDetails(modelId: String): CatalogRuntimeModel? = withContext(Dispatchers.IO) {
-        val obj = getJsonObject("${Constants.HF_API_BASE}/models/$modelId")
-        val tags = extractTags(obj)
-        val siblings = obj.optJSONArray("siblings") ?: JSONArray()
+        val details = requestModelDetails(modelId)
+        val tags = details.tags.filter { it.isNotBlank() }
 
         val allFiles = mutableListOf<RemoteFileRef>()
         var modelFile: RemoteFileRef? = null
         var hasTokenizerAsset = false
 
-        for (i in 0 until siblings.length()) {
-            val sibling = siblings.optJSONObject(i) ?: continue
-            val fileName = sibling.optString("rfilename")
+        details.siblings.forEach { sibling ->
+            val fileName = sibling.fileName?.trim().orEmpty()
+            if (fileName.isBlank()) return@forEach
             val lower = fileName.lowercase(Locale.US)
-            val lfs = sibling.optJSONObject("lfs")
-            val size = when {
-                sibling.has("size") && !sibling.isNull("size") -> sibling.optLong("size", 0L)
-                lfs != null && lfs.has("size") && !lfs.isNull("size") -> lfs.optLong("size", 0L)
-                else -> 0L
-            }
-            val sha = if (lfs != null && lfs.has("sha256") && !lfs.isNull("sha256")) lfs.optString("sha256") else null
+            val size = sibling.size ?: sibling.lfs?.size ?: 0L
 
             val role = when {
                 lower.endsWith(".onnx") -> RemoteFileRole.MODEL
                 lower.endsWith("tokenizer.json") || lower.endsWith("tokenizer.model") -> RemoteFileRole.TOKENIZER
-                lower.endsWith("config.json") || lower.endsWith("generation_config.json") || lower.endsWith("tokenizer_config.json") -> RemoteFileRole.CONFIG
+                lower.endsWith("config.json") ||
+                    lower.endsWith("generation_config.json") ||
+                    lower.endsWith("tokenizer_config.json") -> RemoteFileRole.CONFIG
                 else -> RemoteFileRole.OTHER
             }
-            if (role == RemoteFileRole.OTHER) continue
+            if (role == RemoteFileRole.OTHER) return@forEach
 
             val file = RemoteFileRef(
                 fileName = fileName,
                 downloadUrl = "https://huggingface.co/$modelId/resolve/main/$fileName",
                 sizeBytes = size,
-                sha256 = sha,
+                sha256 = sibling.lfs?.sha256,
                 role = role
             )
             allFiles += file
             if (role == RemoteFileRole.MODEL && modelFile == null) modelFile = file
-            if (
-                role == RemoteFileRole.TOKENIZER ||
-                lower.endsWith("vocab.json") ||
-                lower.endsWith("tokenizer_config.json")
-            ) {
+            if (role == RemoteFileRole.TOKENIZER || lower.endsWith("vocab.json") || lower.endsWith("tokenizer_config.json")) {
                 hasTokenizerAsset = true
             }
         }
@@ -388,30 +336,27 @@ class HfCatalogApi {
             )
         )
 
-        val display = modelId.substringAfterLast('/')
         CatalogRuntimeModel(
             id = modelId,
-            displayName = display,
+            displayName = modelId.substringAfterLast('/'),
             repo = modelId,
             runtime = ModelRuntime.ONNX,
             paramsApprox = estimateParamSize(modelId, tags),
             tags = tags,
-            license = if (obj.has("license") && !obj.isNull("license")) obj.optString("license") else null,
+            license = details.license,
             variants = listOf(variant),
             recommendedTier = recommendTierFromSize(variant.sizeBytes)
         )
     }
 
-    private fun extractTags(obj: JSONObject): List<String> {
-        val tagsJson = obj.optJSONArray("tags") ?: JSONArray()
-        return buildList {
-            for (i in 0 until tagsJson.length()) add(tagsJson.optString(i))
-        }
+    private fun ModelRuntime.toHfFilter(): String = when (this) {
+        ModelRuntime.LLAMA_CPP_GGUF -> "gguf"
+        ModelRuntime.ONNX -> "onnx"
     }
 
     private fun estimateParamSize(modelId: String, tags: List<String>): String {
         val haystack = "$modelId ${tags.joinToString(" ")}".lowercase(Locale.US)
-        val match = Regex("""(?<!\d)(\d+(?:\.\d+)?)\s*([bm])(?![a-z])""").find(haystack)
+        val match = Regex("""(?<!\\d)(\\d+(?:\\.\\d+)?)\\s*([bm])(?![a-z])""").find(haystack)
         if (match != null) {
             val value = match.groupValues[1].toDoubleOrNull()
             val unit = match.groupValues[2]
@@ -443,37 +388,12 @@ class HfCatalogApi {
     }
 
     private fun extractQuant(fileName: String): String {
-        val upper = fileName.uppercase()
+        val upper = fileName.uppercase(Locale.US)
         val known = listOf("Q2_K", "Q3_K", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0")
         known.firstOrNull { upper.contains(it) }?.let { return it }
         val tokens = upper.split(Regex("[^A-Z0-9_]+"))
         val generic = tokens.firstOrNull { it.matches(Regex("I?Q\\d+[A-Z0-9_]*")) }
         if (!generic.isNullOrBlank()) return generic
         return "GGUF"
-    }
-
-    private fun getJsonArray(url: String): JSONArray = JSONArray(request(url))
-
-    private fun getJsonObject(url: String): JSONObject = JSONObject(request(url))
-
-    private fun request(urlString: String): String {
-        val connection = URL(urlString).openConnection() as HttpURLConnection
-        try {
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("User-Agent", Constants.USER_AGENT)
-            connection.setRequestProperty("Accept-Language", Locale.US.toLanguageTag())
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                val err = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                throw IllegalStateException("HTTP $code ${connection.responseMessage}. ${err.take(180)}")
-            }
-            return connection.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            connection.disconnect()
-        }
     }
 }

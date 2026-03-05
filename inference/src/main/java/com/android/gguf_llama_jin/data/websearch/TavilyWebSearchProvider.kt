@@ -1,19 +1,19 @@
 package com.android.gguf_llama_jin.data.websearch
 
 import com.android.gguf_llama_jin.core.AppLogger
-import com.android.gguf_llama_jin.inference_module.BuildConfig
 import com.android.gguf_llama_jin.core.AppResult
+import com.android.gguf_llama_jin.data.network.AppHttpClient
+import com.android.gguf_llama_jin.data.websearch.dto.TavilySearchRequestDto
+import com.android.gguf_llama_jin.data.websearch.dto.TavilySearchResponseDto
+import com.android.gguf_llama_jin.inference_module.BuildConfig
+import io.ktor.client.call.body
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.request.url
+import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
-import java.net.HttpURLConnection
-import java.net.URL
+import kotlinx.coroutines.withTimeout
 
 class TavilyWebSearchProvider(
     private val apiKey: String = BuildConfig.TAVILY_API_KEY,
@@ -28,71 +28,55 @@ class TavilyWebSearchProvider(
 
         val safeLimit = limit.coerceIn(1, 5)
         AppLogger.i("Tavily search start: endpoint=$endpoint queryLen=${query.length} limit=$safeLimit")
-        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 8_000
-            readTimeout = 8_000
-            doInput = true
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-        }
 
         return@withContext try {
-            val requestBody = buildJsonObject {
-                put("api_key", apiKey)
-                put("query", query)
-                put("search_depth", "basic")
-                put("include_answer", false)
-                put("include_raw_content", false)
-                put("max_results", safeLimit)
-            }.toString()
-
-            conn.outputStream.use { os ->
-                os.write(requestBody.toByteArray(Charsets.UTF_8))
+            val response = withTimeout(8_000) {
+                AppHttpClient.client.post {
+                    url(endpoint)
+                    setBody(
+                        TavilySearchRequestDto(
+                            apiKey = apiKey,
+                            query = query,
+                            maxResults = safeLimit
+                        )
+                    )
+                }
             }
 
-            val code = conn.responseCode
-            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                ?.bufferedReader()
-                ?.use { it.readText() }
-                .orEmpty()
-            AppLogger.i("Tavily search HTTP response: code=$code bodyLen=${body.length}")
-
-            if (code !in 200..299) {
-                AppLogger.e("Tavily search failed with HTTP $code")
-                AppResult.Error("Web search failed: HTTP $code")
+            AppLogger.i("Tavily search HTTP response: code=${response.status.value}")
+            if (response.status.value !in 200..299) {
+                AppLogger.e("Tavily search failed with HTTP ${response.status.value}")
+                AppResult.Error("Web search failed: HTTP ${response.status.value}")
             } else {
                 try {
-                    val mapped = mapResponse(body, safeLimit)
+                    val payload = response.body<TavilySearchResponseDto>()
+                    val mapped = mapResponse(payload, safeLimit)
                     AppLogger.i("Tavily search success: hits=${mapped.size}")
                     AppResult.Success(mapped)
                 } catch (t: Throwable) {
                     AppLogger.e("Tavily search parse error", t)
+                    val bodyPreview = response.bodyAsText().take(180)
+                    AppLogger.i("Tavily parse payload preview: $bodyPreview")
                     AppResult.Error("Web search parse error")
                 }
             }
         } catch (t: Throwable) {
             AppLogger.e("Tavily search request failed", t)
             AppResult.Error("Web search request failed")
-        } finally {
-            conn.disconnect()
         }
     }
 
     companion object {
-        internal fun mapResponse(body: String, limit: Int): List<WebSearchHit> {
-            val root = Json.parseToJsonElement(body).jsonObject
-            val results = root["results"]?.jsonArray.orEmpty()
+        internal fun mapResponse(body: TavilySearchResponseDto, limit: Int): List<WebSearchHit> {
             val dedupe = linkedSetOf<String>()
             val mapped = mutableListOf<WebSearchHit>()
 
-            for (entry in results) {
-                val obj = entry.jsonObject
-                val url = obj["url"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            for (entry in body.results) {
+                val url = entry.url?.trim().orEmpty()
                 if (url.isBlank() || !dedupe.add(url)) continue
 
-                val title = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                val content = obj["content"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val title = entry.title?.trim().orEmpty()
+                val content = entry.content?.trim().orEmpty()
                 val snippet = content.replace(Regex("\\s+"), " ").take(320)
 
                 mapped += WebSearchHit(

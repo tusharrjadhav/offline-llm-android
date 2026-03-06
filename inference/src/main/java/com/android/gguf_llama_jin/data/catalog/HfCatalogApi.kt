@@ -152,7 +152,7 @@ class HfCatalogApi {
         if (ModelRuntime.ONNX in runtimes) {
             val allFiles = mutableListOf<RemoteFileRef>()
             var modelFile: RemoteFileRef? = null
-            var hasTokenizerAsset = false
+            var hasTokenizerJson = false
 
             details.siblings.forEach { sibling ->
                 val fileName = sibling.fileName?.trim().orEmpty()
@@ -163,6 +163,7 @@ class HfCatalogApi {
 
                 val role = when {
                     lower.endsWith(".onnx") -> RemoteFileRole.MODEL
+                    lower.contains(".onnx.data") || lower.endsWith(".onnx_data") -> RemoteFileRole.MODEL
                     lower.endsWith("tokenizer.json") || lower.endsWith("tokenizer.model") -> RemoteFileRole.TOKENIZER
                     lower.endsWith("config.json") ||
                         lower.endsWith("generation_config.json") ||
@@ -179,13 +180,14 @@ class HfCatalogApi {
                     role = role
                 )
                 allFiles += file
-                if (role == RemoteFileRole.MODEL && modelFile == null) modelFile = file
-                if (role == RemoteFileRole.TOKENIZER || lower.endsWith("vocab.json") || lower.endsWith("tokenizer_config.json")) {
-                    hasTokenizerAsset = true
+                if (lower.endsWith(".onnx") && modelFile == null) modelFile = file
+                if (lower.endsWith("tokenizer.json")) {
+                    hasTokenizerJson = true
                 }
             }
 
-            if (modelFile != null && hasTokenizerAsset) {
+            val onnxChatCompatible = isLikelyOnnxChatModel(modelId, tags)
+            if (modelFile != null && hasTokenizerJson && onnxChatCompatible) {
                 val variant = ModelVariant(
                     variantId = "ONNX",
                     sizeBytes = allFiles.sumOf { it.sizeBytes.coerceAtLeast(0L) },
@@ -265,5 +267,25 @@ class HfCatalogApi {
         val generic = tokens.firstOrNull { it.matches(Regex("I?Q\\d+[A-Z0-9_]*")) }
         if (!generic.isNullOrBlank()) return generic
         return "GGUF"
+    }
+
+    private fun isLikelyOnnxChatModel(modelId: String, tags: List<String>): Boolean {
+        val haystack = buildString {
+            append(modelId.lowercase(Locale.US))
+            append(' ')
+            append(tags.joinToString(" ").lowercase(Locale.US))
+        }
+        if ("gpt2" in haystack && "instruct" !in haystack) return false
+        return listOf(
+            "instruct",
+            "chat",
+            "assistant",
+            "sft",
+            "dialog",
+            "smollm",
+            "llama",
+            "qwen",
+            "phi"
+        ).any { it in haystack }
     }
 }

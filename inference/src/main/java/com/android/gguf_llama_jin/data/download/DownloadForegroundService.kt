@@ -4,10 +4,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.pm.ServiceInfo
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.android.gguf_llama_jin.core.Constants
 import com.android.gguf_llama_jin.core.ModelRuntime
 import org.json.JSONArray
@@ -17,10 +21,33 @@ class DownloadForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
-        startForeground(Constants.DOWNLOAD_NOTIFICATION_ID, baseNotification("Preparing downloads"))
+        if (!startAsForeground()) {
+            stopSelf()
+            return
+        }
 
         DownloadCoordinator.restoreQueue(this).forEach {
             DownloadCoordinator.enqueue(this, it)
+        }
+    }
+
+    private fun startAsForeground(): Boolean {
+        val notification = baseNotification("Preparing downloads")
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    Constants.DOWNLOAD_NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(Constants.DOWNLOAD_NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (exception: SecurityException) {
+            Log.e(TAG, "Failed to start dataSync foreground service", exception)
+            false
         }
     }
 
@@ -108,6 +135,7 @@ class DownloadForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "DownloadForegroundSvc"
         const val EXTRA_REQUEST_JSON = "extra_request_json"
 
         fun start(context: Context, request: DownloadRequest) {

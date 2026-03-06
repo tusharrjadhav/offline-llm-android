@@ -140,13 +140,19 @@ object DownloadCoordinator {
         key: String,
         file: DownloadFile,
         downloadedBeforeFile: Long,
-        totalBytesHint: Long
+        totalBytesHint: Long,
+        allowRetryOn416: Boolean = true
     ): Long {
         val target = File(file.targetPath)
         val existingBytes = if (target.exists()) target.length() else 0L
         var conn: HttpURLConnection? = null
         var downloaded = downloadedBeforeFile + existingBytes
+        val expectedSize = file.expectedSizeBytes
         try {
+            if (expectedSize != null && existingBytes == expectedSize) {
+                AppLogger.i("Skipping already-complete file: ${file.fileName} size=$existingBytes")
+                return downloaded
+            }
             updateState(
                 key,
                 _states.value[key]!!.copy(
@@ -164,6 +170,26 @@ object DownloadCoordinator {
             conn.readTimeout = 30_000
 
             val responseCode = conn.responseCode
+            if (responseCode == 416 && existingBytes > 0L) {
+                val serverLength = contentRangeTotal(conn.getHeaderField("Content-Range"))
+                val expectedOrServer = expectedSize ?: serverLength
+                if (expectedOrServer != null && existingBytes >= expectedOrServer) {
+                    AppLogger.i("HTTP 416 but file considered complete: ${file.fileName} existing=$existingBytes expected=$expectedOrServer")
+                    return downloadedBeforeFile + existingBytes
+                }
+                if (allowRetryOn416) {
+                    AppLogger.i("HTTP 416 retrying from scratch for ${file.fileName}; existing=$existingBytes expected=$expectedOrServer")
+                    target.delete()
+                    downloaded -= existingBytes
+                    return downloadSingleFile(
+                        key = key,
+                        file = file,
+                        downloadedBeforeFile = downloadedBeforeFile,
+                        totalBytesHint = totalBytesHint,
+                        allowRetryOn416 = false
+                    )
+                }
+            }
             if (responseCode !in 200..299 && responseCode != HttpURLConnection.HTTP_PARTIAL) {
                 val errBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 throw IllegalStateException("HTTP $responseCode ${conn.responseMessage}. ${errBody.take(180)}")
@@ -197,6 +223,14 @@ object DownloadCoordinator {
         } finally {
             runCatching { conn?.disconnect() }
         }
+    }
+
+    private fun contentRangeTotal(contentRange: String?): Long? {
+        if (contentRange.isNullOrBlank()) return null
+        // Example: bytes */123456 or bytes 100-999/123456
+        val slash = contentRange.lastIndexOf('/')
+        if (slash < 0 || slash >= contentRange.length - 1) return null
+        return contentRange.substring(slash + 1).trim().toLongOrNull()
     }
 
     private fun updateState(key: String, value: DownloadTaskState) {

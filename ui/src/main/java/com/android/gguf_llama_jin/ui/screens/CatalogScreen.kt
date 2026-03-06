@@ -28,6 +28,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -248,7 +250,13 @@ private fun CatalogRepoCard(model: CatalogRepoModel, state: AppUiState, viewMode
                 }
             }
 
-            if (activeTask != null && activeTask.state != DownloadState.FAILED && activeTask.state != DownloadState.CANCELED) {
+            val showProgress = activeTask != null && (
+                activeTask.state == DownloadState.QUEUED ||
+                    activeTask.state == DownloadState.DOWNLOADING ||
+                    activeTask.state == DownloadState.PAUSED ||
+                    activeTask.state == DownloadState.VERIFYING
+                )
+            if (showProgress) {
                 Text("Status (${activeTask.request.runtime.label()}): ${activeTask.state}")
                 val progress = if (activeTask.totalBytes > 0) {
                     (activeTask.downloadedBytes.toFloat() / activeTask.totalBytes.toFloat()).coerceIn(0f, 1f)
@@ -260,13 +268,33 @@ private fun CatalogRepoCard(model: CatalogRepoModel, state: AppUiState, viewMode
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
             }
+            if (activeTask?.state == DownloadState.COMPLETED) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Downloaded (${activeTask.request.runtime.label()})",
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
 
             if (!activeMessage.isNullOrBlank()) {
                 Text(activeMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                FilledIconButton(onClick = { viewModel.openDownloadPicker(model.id) }) {
+                val downloadActive = activeTask != null &&
+                    activeTask.state != DownloadState.COMPLETED &&
+                    activeTask.state != DownloadState.CANCELED &&
+                    activeTask.state != DownloadState.FAILED
+                FilledIconButton(
+                    onClick = { viewModel.openDownloadPicker(model.id) },
+                    enabled = !downloadActive
+                ) {
                     Icon(Icons.Filled.Download, contentDescription = "Download")
                 }
 
@@ -302,6 +330,7 @@ private fun DownloadRuntimeBottomSheet(viewModel: AppViewModel, state: AppUiStat
     val variants = modelVariantsForUi(option, runtime)
     val selectedVariant = state.downloadVariantSelectionByRuntime[runtime]
         ?: variants.firstOrNull()?.variantId
+    val runtimeInstalled = state.installed.any { it.id == repo.id && it.runtime == runtime }
 
     ModalBottomSheet(onDismissRequest = { viewModel.closeDownloadPicker() }) {
         Column(
@@ -315,9 +344,23 @@ private fun DownloadRuntimeBottomSheet(viewModel: AppViewModel, state: AppUiStat
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 repo.supportedRuntimes.forEach { runtimeOption ->
-                    AssistChip(
+                    val isSelected = runtime == runtimeOption
+                    val isInstalledRuntime = state.installed.any { it.id == repo.id && it.runtime == runtimeOption }
+                    FilterChip(
                         onClick = { viewModel.selectDownloadRuntime(runtimeOption) },
-                        label = { Text(runtimeOption.label()) }
+                        enabled = !isInstalledRuntime,
+                        selected = isSelected,
+                        label = { Text(runtimeOption.label()) },
+                        trailingIcon = {
+                            if (isSelected) {
+                                Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
                     )
                 }
             }
@@ -327,24 +370,31 @@ private fun DownloadRuntimeBottomSheet(viewModel: AppViewModel, state: AppUiStat
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 variants.forEach { variant ->
-                    AssistChip(
+                    val isSelected = selectedVariant == variant.variantId
+                    FilterChip(
                         onClick = { viewModel.selectDownloadVariant(runtime, variant.variantId) },
+                        selected = isSelected,
                         label = {
-                            Text(
-                                if (selectedVariant == variant.variantId) {
-                                    "${variant.variantId} *"
-                                } else {
-                                    variant.variantId
-                                }
-                            )
+                            Text(variant.variantId)
                         }
+                        ,
+                        trailingIcon = {
+                            if (isSelected) {
+                                Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
                     )
                 }
             }
 
             Button(
                 onClick = { viewModel.confirmDownloadSelection() },
-                enabled = selectedVariant != null,
+                enabled = selectedVariant != null && !runtimeInstalled,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Download ${runtime.label()}")

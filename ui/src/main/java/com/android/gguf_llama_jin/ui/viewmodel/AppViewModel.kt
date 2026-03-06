@@ -229,9 +229,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openDownloadPicker(repoId: String) {
         val repo = findRepo(repoId) ?: return
-        val runtime = repo.supportedRuntimes.firstOrNull() ?: return
-        val selectedRuntime = if (repo.supportedRuntimes.size == 1) runtime else _uiState.value.preferredRuntime.takeIf { it in repo.supportedRuntimes }
-            ?: runtime
+        val availableRuntimes = repo.supportedRuntimes.filter { runtime ->
+            runtime == ModelRuntime.ONNX || _uiState.value.installed.none { it.id == repo.id && it.runtime == runtime }
+        }
+        val runtime = availableRuntimes.firstOrNull() ?: repo.supportedRuntimes.firstOrNull() ?: return
+        val selectedRuntime = if (availableRuntimes.size == 1) runtime else {
+            _uiState.value.preferredRuntime.takeIf { it in availableRuntimes } ?: runtime
+        }
         val defaults = repo.runtimeOptions.mapValues { (_, option) ->
             option.variants.firstOrNull()?.variantId.orEmpty()
         }.filterValues { it.isNotBlank() }
@@ -273,10 +277,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?: return
         val selectedVariant = runtimeOption.variants.firstOrNull { it.variantId == selectedVariantId } ?: return
 
+        val runtimeAlreadyInstalled = _uiState.value.installed.any {
+            it.id == repo.id && it.runtime == runtime
+        }
+        if (runtimeAlreadyInstalled) {
+            if (runtime == ModelRuntime.ONNX) {
+                setModelMessage(runtime, repo.id, "ONNX runtime already exists. Re-downloading files to repair missing assets.")
+                _effects.tryEmit(AppUiEffect.ShowMessage("Re-downloading ONNX files for repair"))
+            } else {
+                val runtimeLabel = when (runtime) {
+                    ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
+                    ModelRuntime.ONNX -> "ONNX"
+                }
+                setModelMessage(runtime, repo.id, "$runtimeLabel runtime is already downloaded")
+                _effects.tryEmit(AppUiEffect.ShowMessage("$runtimeLabel runtime already downloaded"))
+                closeDownloadPicker()
+                return
+            }
+        }
+
         val isInstalled = _uiState.value.installed.any {
             it.id == repo.id && it.runtime == runtime && it.variant == selectedVariantId
         }
-        if (isInstalled) {
+        if (isInstalled && runtime != ModelRuntime.ONNX) {
             setModelMessage(runtime, repo.id, "Model already downloaded for $selectedVariantId")
             _effects.tryEmit(AppUiEffect.ShowMessage("Model already downloaded"))
             closeDownloadPicker()
@@ -356,7 +379,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             preferredRuntime = runtime,
             selectedRuntimeFilters = setOf(runtime),
             firstRun = false,
-            statusMessage = "Default model set"
+            statusMessage = null
         )
     }
 
@@ -475,6 +498,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppLogger.e("sendPrompt blocked: no installed model selected. runtime=$runtime selectedModelId=$modelId")
             return
         }
+        if (runtime == ModelRuntime.ONNX && !isLikelyOnnxChatModel(installedModel.id)) {
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "Selected ONNX model is not instruction/chat tuned. Choose an ONNX instruct model for relevant replies.",
+                chatMeta = _uiState.value.chatMeta.copy(modelPickerVisible = true)
+            )
+            _effects.tryEmit(AppUiEffect.ShowMessage("ONNX model is not chat-tuned. Pick an instruct ONNX model."))
+            AppLogger.e("sendPrompt blocked: non-chat ONNX model selected modelId=${installedModel.id}")
+            return
+        }
 
         appendUserMessage(prompt)
         appendAssistantToken("")
@@ -566,26 +598,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             var firstTokenNs: Long? = null
             var tokenCount = 0
 
-            inference.generate(promptForInference, SamplingParams()).collect { chunk ->
-                if (chunk.isDone) {
-                    val durationSec = (System.nanoTime() - startNs) / 1_000_000_000.0
-                    val tps = if (durationSec > 0) tokenCount / durationSec else 0.0
-                    _uiState.value = _uiState.value.copy(
-                        generating = false,
-                        ttftMs = firstTokenNs?.let { it / 1_000_000 },
-                        tokensPerSec = tps,
-                        webSearchInFlight = false
-                    )
-                    finalizeAssistantMessage()
-                    telemetry.track("generation_done", mapOf("tokens" to tokenCount.toString()))
-                    return@collect
-                }
+            try {
+                inference.generate(promptForInference, SamplingParams()).collect { chunk ->
+                    if (chunk.isDone) {
+                        val durationSec = (System.nanoTime() - startNs) / 1_000_000_000.0
+                        val tps = if (durationSec > 0) tokenCount / durationSec else 0.0
+                        _uiState.value = _uiState.value.copy(
+                            generating = false,
+                            ttftMs = firstTokenNs?.let { it / 1_000_000 },
+                            tokensPerSec = tps,
+                            webSearchInFlight = false
+                        )
+                        if (installedModel.runtime == ModelRuntime.ONNX) {
+                            normalizeLastOnnxAssistantReply(prompt)
+                        }
+                        finalizeAssistantMessage()
+                        telemetry.track("generation_done", mapOf("tokens" to tokenCount.toString()))
+                        return@collect
+                    }
 
-                if (firstTokenNs == null && chunk.token.isNotEmpty()) {
-                    firstTokenNs = System.nanoTime() - startNs
+                    if (firstTokenNs == null && chunk.token.isNotEmpty()) {
+                        firstTokenNs = System.nanoTime() - startNs
+                    }
+                    tokenCount++
+                    appendAssistantToken(chunk.token)
                 }
-                tokenCount++
-                appendAssistantToken(chunk.token)
+            } catch (t: Throwable) {
+                AppLogger.e("generation failed runtime=${installedModel.runtime} modelId=${installedModel.id}", t)
+                val message = t.message ?: "Generation failed"
+                appendAssistantToken("[Error] $message")
+                finalizeAssistantMessage()
+                _uiState.value = _uiState.value.copy(
+                    generating = false,
+                    webSearchInFlight = false,
+                    statusMessage = message
+                )
+                _effects.tryEmit(AppUiEffect.ShowMessage(message))
             }
         }
     }
@@ -645,6 +693,53 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             thread.copy(messages = messages, updatedAt = System.currentTimeMillis())
         }
+    }
+
+    private fun normalizeLastOnnxAssistantReply(userPrompt: String) {
+        updateActiveThread { thread ->
+            val messages = thread.messages.toMutableList()
+            val last = messages.lastOrNull()
+            if (last == null || last.role != "assistant") return@updateActiveThread thread
+            val normalized = sanitizeOnnxReply(last.text, userPrompt)
+            if (normalized.isNotBlank() && normalized != last.text) {
+                messages[messages.lastIndex] = last.copy(text = normalized)
+            }
+            thread.copy(messages = messages, updatedAt = System.currentTimeMillis())
+        }
+    }
+
+    private fun sanitizeOnnxReply(raw: String, userPrompt: String): String {
+        var text = raw.trim()
+        val assistantTagRegex = Regex("(?i)assistant\\s*:")
+        val userTagRegex = Regex("(?i)user\\s*:")
+        val systemTagRegex = Regex("(?i)system\\s*:")
+
+        if (assistantTagRegex.containsMatchIn(text) &&
+            (userTagRegex.containsMatchIn(text) || systemTagRegex.containsMatchIn(text))
+        ) {
+            val lastAssistant = assistantTagRegex.findAll(text).lastOrNull()
+            if (lastAssistant != null) {
+                text = text.substring(lastAssistant.range.last + 1).trim()
+            }
+        } else {
+            val leadingAssistant = assistantTagRegex.find(text)
+            if (leadingAssistant != null && leadingAssistant.range.first == 0) {
+                text = text.substring(leadingAssistant.range.last + 1).trim()
+            }
+        }
+
+        val trimmedPrompt = userPrompt.trim()
+        if (trimmedPrompt.isNotBlank() && text.startsWith(trimmedPrompt, ignoreCase = true)) {
+            text = text.removePrefix(trimmedPrompt).trimStart(':', '-', '\n', ' ')
+        }
+        return text
+    }
+
+    private fun isLikelyOnnxChatModel(modelId: String): Boolean {
+        val id = modelId.lowercase()
+        if ("gpt2" in id && "instruct" !in id) return false
+        return listOf("instruct", "chat", "assistant", "sft", "dialog", "smollm", "llama", "qwen", "phi")
+            .any { it in id }
     }
 
     private fun autoTitleThreadIfNeeded(currentTitle: String, messages: List<ChatMessage>): String {

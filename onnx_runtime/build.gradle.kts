@@ -23,5 +23,8 @@ android {
 dependencies {
     implementation(project(":inference"))
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.onnxruntime.android)
+
+    testImplementation(libs.junit)
 }

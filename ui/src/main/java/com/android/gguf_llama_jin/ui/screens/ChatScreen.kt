@@ -321,12 +321,6 @@ private fun ModelPickerBottomSheet(
                 state = state,
                 viewModel = viewModel
             )
-            RuntimeSection(
-                title = "ONNX",
-                runtime = ModelRuntime.ONNX,
-                state = state,
-                viewModel = viewModel
-            )
 
             HorizontalDivider()
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {

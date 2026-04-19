@@ -28,7 +28,7 @@ class HfCatalogApi {
     ): AppResult<List<CatalogRepoModel>> = withContext(Dispatchers.IO) {
         try {
             val selected = runtimes.ifEmpty {
-                setOf(ModelRuntime.LLAMA_CPP_GGUF, ModelRuntime.ONNX)
+                setOf(ModelRuntime.LLAMA_CPP_GGUF)
             }
             val filters = selected.map { it.toHfFilter() }.toSet().sorted()
             val pipelineTag = "text-generation"
@@ -149,61 +149,6 @@ class HfCatalogApi {
             }
         }
 
-        if (ModelRuntime.ONNX in runtimes) {
-            val allFiles = mutableListOf<RemoteFileRef>()
-            var modelFile: RemoteFileRef? = null
-            var hasTokenizerJson = false
-
-            details.siblings.forEach { sibling ->
-                val fileName = sibling.fileName?.trim().orEmpty()
-                if (fileName.isBlank()) return@forEach
-                val lower = fileName.lowercase(Locale.US)
-                val size = sibling.size ?: sibling.lfs?.size ?: 0L
-                val sha = sibling.lfs?.sha256
-
-                val role = when {
-                    lower.endsWith(".onnx") -> RemoteFileRole.MODEL
-                    lower.contains(".onnx.data") || lower.endsWith(".onnx_data") -> RemoteFileRole.MODEL
-                    lower.endsWith("tokenizer.json") || lower.endsWith("tokenizer.model") -> RemoteFileRole.TOKENIZER
-                    lower.endsWith("config.json") ||
-                        lower.endsWith("generation_config.json") ||
-                        lower.endsWith("tokenizer_config.json") -> RemoteFileRole.CONFIG
-                    else -> RemoteFileRole.OTHER
-                }
-                if (role == RemoteFileRole.OTHER) return@forEach
-
-                val file = RemoteFileRef(
-                    fileName = fileName,
-                    downloadUrl = "https://huggingface.co/$modelId/resolve/main/$fileName",
-                    sizeBytes = size,
-                    sha256 = sha,
-                    role = role
-                )
-                allFiles += file
-                if (lower.endsWith(".onnx") && modelFile == null) modelFile = file
-                if (lower.endsWith("tokenizer.json")) {
-                    hasTokenizerJson = true
-                }
-            }
-
-            val onnxChatCompatible = isLikelyOnnxChatModel(modelId, tags)
-            if (modelFile != null && hasTokenizerJson && onnxChatCompatible) {
-                val variant = ModelVariant(
-                    variantId = "ONNX",
-                    sizeBytes = allFiles.sumOf { it.sizeBytes.coerceAtLeast(0L) },
-                    downloadFiles = allFiles.sortedBy { it.role.ordinal },
-                    metadata = mapOf(
-                        "files" to allFiles.size.toString(),
-                        "model_file" to (modelFile?.fileName ?: "")
-                    )
-                )
-                runtimeOptions[ModelRuntime.ONNX] = RuntimeOption(
-                    runtime = ModelRuntime.ONNX,
-                    variants = listOf(variant),
-                    recommendedTier = recommendTierFromSize(variant.sizeBytes)
-                )
-            }
-        }
 
         if (runtimeOptions.isEmpty()) {
             AppLogger.i("HF catalog skipping repo=$modelId no compatible files for runtimes=$runtimes")
@@ -223,7 +168,6 @@ class HfCatalogApi {
 
     private fun ModelRuntime.toHfFilter(): String = when (this) {
         ModelRuntime.LLAMA_CPP_GGUF -> "gguf"
-        ModelRuntime.ONNX -> "onnx"
     }
 
     private fun estimateParamSize(modelId: String, tags: List<String>): String {
@@ -269,23 +213,4 @@ class HfCatalogApi {
         return "GGUF"
     }
 
-    private fun isLikelyOnnxChatModel(modelId: String, tags: List<String>): Boolean {
-        val haystack = buildString {
-            append(modelId.lowercase(Locale.US))
-            append(' ')
-            append(tags.joinToString(" ").lowercase(Locale.US))
-        }
-        if ("gpt2" in haystack && "instruct" !in haystack) return false
-        return listOf(
-            "instruct",
-            "chat",
-            "assistant",
-            "sft",
-            "dialog",
-            "smollm",
-            "llama",
-            "qwen",
-            "phi"
-        ).any { it in haystack }
-    }
 }

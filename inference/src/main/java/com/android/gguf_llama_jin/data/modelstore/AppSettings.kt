@@ -13,13 +13,11 @@ class AppSettings(private val context: Context) {
 
     fun defaultModelId(runtime: ModelRuntime): String? = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> prefs().getString(KEY_DEFAULT_MODEL_ID_LLAMA, null)
-        ModelRuntime.ONNX -> prefs().getString(KEY_DEFAULT_MODEL_ID_ONNX, null)
     }
 
     fun setDefaultModelId(runtime: ModelRuntime, value: String?) {
         val key = when (runtime) {
             ModelRuntime.LLAMA_CPP_GGUF -> KEY_DEFAULT_MODEL_ID_LLAMA
-            ModelRuntime.ONNX -> KEY_DEFAULT_MODEL_ID_ONNX
         }
         prefs().edit().putString(key, value).apply()
     }
@@ -54,7 +52,6 @@ class AppSettings(private val context: Context) {
         const val KEY_WIFI_ONLY = "wifi_only_download"
         const val KEY_DEFAULT_MODEL_ID_LEGACY = "default_model_id"
         const val KEY_DEFAULT_MODEL_ID_LLAMA = "default_model_id_llama_cpp"
-        const val KEY_DEFAULT_MODEL_ID_ONNX = "default_model_id_onnx"
         const val KEY_PREFERRED_RUNTIME = "preferred_runtime"
         const val KEY_WEB_SEARCH_ALLOWED = "web_search_allowed"
     }

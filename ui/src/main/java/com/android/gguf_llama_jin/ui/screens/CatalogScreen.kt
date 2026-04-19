@@ -204,7 +204,7 @@ fun CatalogScreen(viewModel: AppViewModel, padding: PaddingValues) {
 
 @Composable
 private fun CatalogRepoCard(model: CatalogRepoModel, state: AppUiState, viewModel: AppViewModel) {
-    val runtimeOrder = listOf(ModelRuntime.LLAMA_CPP_GGUF, ModelRuntime.ONNX)
+    val runtimeOrder = listOf(ModelRuntime.LLAMA_CPP_GGUF)
     val runtimes = runtimeOrder.filter { it in model.supportedRuntimes }
     val activeTask = state.downloads.values.firstOrNull { it.request.modelId == model.id }
     val activeRuntime = activeTask?.request?.runtime
@@ -407,11 +407,9 @@ private fun DownloadRuntimeBottomSheet(viewModel: AppViewModel, state: AppUiStat
 private fun RuntimeBadge(runtime: ModelRuntime) {
     val containerColor = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.tertiaryContainer
-        ModelRuntime.ONNX -> MaterialTheme.colorScheme.secondaryContainer
     }
     val contentColor = when (runtime) {
         ModelRuntime.LLAMA_CPP_GGUF -> MaterialTheme.colorScheme.onTertiaryContainer
-        ModelRuntime.ONNX -> MaterialTheme.colorScheme.onSecondaryContainer
     }
     Surface(
         shape = RoundedCornerShape(999.dp),

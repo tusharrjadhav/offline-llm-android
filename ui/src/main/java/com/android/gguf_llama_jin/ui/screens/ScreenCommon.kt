@@ -40,22 +40,6 @@ fun RuntimeMultiFilterRow(selected: Set<ModelRuntime>, onToggle: (ModelRuntime) 
                 selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
             )
         )
-        val onnxSelected = ModelRuntime.ONNX in selected
-        FilterChip(
-            onClick = { onToggle(ModelRuntime.ONNX) },
-            selected = onnxSelected,
-            label = { Text("ONNX") },
-            trailingIcon = {
-                if (onnxSelected) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                }
-            },
-            colors = FilterChipDefaults.filterChipColors(
-                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        )
     }
 }
 
@@ -74,15 +58,6 @@ fun RuntimeFilterRow(selected: ModelRuntime, onSelect: (ModelRuntime) -> Unit) {
                 }
             }
         )
-        AssistChip(
-            onClick = { onSelect(ModelRuntime.ONNX) },
-            label = { Text("ONNX") },
-            trailingIcon = {
-                if (selected == ModelRuntime.ONNX) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                }
-            }
-        )
     }
 }
 
@@ -93,7 +68,6 @@ fun RuntimeChip(runtime: ModelRuntime) {
 
 fun ModelRuntime.label(): String = when (this) {
     ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
-    ModelRuntime.ONNX -> "ONNX"
 }
 
 fun formatFileSize(sizeBytes: Long): String {

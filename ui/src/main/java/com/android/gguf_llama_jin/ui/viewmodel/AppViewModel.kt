@@ -27,7 +27,6 @@ import com.android.gguf_llama_jin.domain.websearch.WebSearchDecision
 import com.android.gguf_llama_jin.domain.websearch.WebSearchGate
 import com.android.gguf_llama_jin.inference.InferenceSessionManager
 import com.android.gguf_llama_jin.inference.LlmNativeBridgeImpl
-import com.android.gguf_llama_jin.inference.OnnxRuntimeBridgeImpl
 import com.android.gguf_llama_jin.inference.RuntimeModelRef
 import com.android.gguf_llama_jin.inference.SamplingParams
 import com.android.gguf_llama_jin.telemetry.Telemetry
@@ -50,7 +49,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val installUseCase = InstallModelUseCase(modelRegistry)
     private val settings = AppSettings(appContext)
     private val telemetry = Telemetry(appContext)
-    private val inference = InferenceSessionManager(setOf(LlmNativeBridgeImpl(), OnnxRuntimeBridgeImpl()))
+    private val inference = InferenceSessionManager(setOf(LlmNativeBridgeImpl()))
     private val webSearchProvider: WebSearchProvider = WebSearchProviderFactory.create()
     private val webSearchGate: WebSearchGate = RuleBasedWebSearchGate()
 
@@ -67,8 +66,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(
         AppUiState(
-            firstRun = settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF) == null &&
-                settings.defaultModelId(ModelRuntime.ONNX) == null,
+            firstRun = settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF) == null,
             capabilitySnapshot = DeviceHeuristics.snapshot(appContext),
             telemetryEnabled = telemetry.isEnabled(),
             historyEnabled = settings.chatHistoryEnabled(),
@@ -76,10 +74,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             webSearchAllowed = settings.webSearchAllowed(),
             webSearchEnabled = settings.webSearchAllowed(),
             preferredRuntime = settings.preferredRuntime(),
-            selectedRuntimeFilters = setOf(ModelRuntime.LLAMA_CPP_GGUF, ModelRuntime.ONNX),
+            selectedRuntimeFilters = setOf(ModelRuntime.LLAMA_CPP_GGUF),
             selectedModelByRuntime = mapOf(
-                ModelRuntime.LLAMA_CPP_GGUF to settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF),
-                ModelRuntime.ONNX to settings.defaultModelId(ModelRuntime.ONNX)
+                ModelRuntime.LLAMA_CPP_GGUF to settings.defaultModelId(ModelRuntime.LLAMA_CPP_GGUF)
             )
         )
     )
@@ -100,13 +97,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             val installKey = task.request.id()
                             if (!handledInstalls.contains(installKey)) {
                                 handledInstalls += installKey
-                                val modelFile = task.request.files.firstOrNull { it.fileName.endsWith(".gguf", true) || it.fileName.endsWith(".onnx", true) }
+                                val modelFile = task.request.files.firstOrNull { it.fileName.endsWith(".gguf", true) }
                                     ?: task.request.files.firstOrNull()
                                     ?: return@forEach
                                 val size = task.request.files.sumOf { f -> File(f.targetPath).takeIf { it.exists() }?.length() ?: 0L }
-                                val assetDir = if (task.request.runtime == ModelRuntime.ONNX) {
-                                    File(modelFile.targetPath).parentFile?.absolutePath
-                                } else null
                                 installUseCase.markInstalled(
                                     InstalledModel(
                                         id = task.request.modelId,
@@ -117,7 +111,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                         sha256 = task.request.files.firstOrNull()?.expectedSha256,
                                         installedAt = System.currentTimeMillis(),
                                         lastUsedAt = System.currentTimeMillis(),
-                                        assetDir = assetDir
+                                        assetDir = null
                                     )
                                 )
                                 loadInstalled()
@@ -202,7 +196,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         repo.runtimeOptions.forEach { (runtime, option) ->
                             val preferred = when (runtime) {
                                 ModelRuntime.LLAMA_CPP_GGUF -> option.variants.firstOrNull { it.variantId == Constants.DEFAULT_QUANT }?.variantId
-                                ModelRuntime.ONNX -> option.variants.firstOrNull()?.variantId
                             } ?: option.variants.firstOrNull()?.variantId ?: return@forEach
                             defaults[key(repo.id, runtime)] = preferred
                         }
@@ -230,7 +223,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openDownloadPicker(repoId: String) {
         val repo = findRepo(repoId) ?: return
         val availableRuntimes = repo.supportedRuntimes.filter { runtime ->
-            runtime == ModelRuntime.ONNX || _uiState.value.installed.none { it.id == repo.id && it.runtime == runtime }
+            _uiState.value.installed.none { it.id == repo.id && it.runtime == runtime }
         }
         val runtime = availableRuntimes.firstOrNull() ?: repo.supportedRuntimes.firstOrNull() ?: return
         val selectedRuntime = if (availableRuntimes.size == 1) runtime else {
@@ -281,25 +274,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.id == repo.id && it.runtime == runtime
         }
         if (runtimeAlreadyInstalled) {
-            if (runtime == ModelRuntime.ONNX) {
-                setModelMessage(runtime, repo.id, "ONNX runtime already exists. Re-downloading files to repair missing assets.")
-                _effects.tryEmit(AppUiEffect.ShowMessage("Re-downloading ONNX files for repair"))
-            } else {
-                val runtimeLabel = when (runtime) {
-                    ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
-                    ModelRuntime.ONNX -> "ONNX"
-                }
-                setModelMessage(runtime, repo.id, "$runtimeLabel runtime is already downloaded")
-                _effects.tryEmit(AppUiEffect.ShowMessage("$runtimeLabel runtime already downloaded"))
-                closeDownloadPicker()
-                return
+            val runtimeLabel = when (runtime) {
+                ModelRuntime.LLAMA_CPP_GGUF -> "GGUF"
             }
+            setModelMessage(runtime, repo.id, "$runtimeLabel runtime is already downloaded")
+            _effects.tryEmit(AppUiEffect.ShowMessage("$runtimeLabel runtime already downloaded"))
+            closeDownloadPicker()
+            return
         }
 
         val isInstalled = _uiState.value.installed.any {
             it.id == repo.id && it.runtime == runtime && it.variant == selectedVariantId
         }
-        if (isInstalled && runtime != ModelRuntime.ONNX) {
+        if (isInstalled) {
             setModelMessage(runtime, repo.id, "Model already downloaded for $selectedVariantId")
             _effects.tryEmit(AppUiEffect.ShowMessage("Model already downloaded"))
             closeDownloadPicker()
@@ -498,15 +485,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppLogger.e("sendPrompt blocked: no installed model selected. runtime=$runtime selectedModelId=$modelId")
             return
         }
-        if (runtime == ModelRuntime.ONNX && !isLikelyOnnxChatModel(installedModel.id)) {
-            _uiState.value = _uiState.value.copy(
-                statusMessage = "Selected ONNX model is not instruction/chat tuned. Choose an ONNX instruct model for relevant replies.",
-                chatMeta = _uiState.value.chatMeta.copy(modelPickerVisible = true)
-            )
-            _effects.tryEmit(AppUiEffect.ShowMessage("ONNX model is not chat-tuned. Pick an instruct ONNX model."))
-            AppLogger.e("sendPrompt blocked: non-chat ONNX model selected modelId=${installedModel.id}")
-            return
-        }
 
         appendUserMessage(prompt)
         appendAssistantToken("")
@@ -609,9 +587,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             tokensPerSec = tps,
                             webSearchInFlight = false
                         )
-                        if (installedModel.runtime == ModelRuntime.ONNX) {
-                            normalizeLastOnnxAssistantReply(prompt)
-                        }
                         finalizeAssistantMessage()
                         telemetry.track("generation_done", mapOf("tokens" to tokenCount.toString()))
                         return@collect
@@ -695,52 +670,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun normalizeLastOnnxAssistantReply(userPrompt: String) {
-        updateActiveThread { thread ->
-            val messages = thread.messages.toMutableList()
-            val last = messages.lastOrNull()
-            if (last == null || last.role != "assistant") return@updateActiveThread thread
-            val normalized = sanitizeOnnxReply(last.text, userPrompt)
-            if (normalized.isNotBlank() && normalized != last.text) {
-                messages[messages.lastIndex] = last.copy(text = normalized)
-            }
-            thread.copy(messages = messages, updatedAt = System.currentTimeMillis())
-        }
-    }
-
-    private fun sanitizeOnnxReply(raw: String, userPrompt: String): String {
-        var text = raw.trim()
-        val assistantTagRegex = Regex("(?i)assistant\\s*:")
-        val userTagRegex = Regex("(?i)user\\s*:")
-        val systemTagRegex = Regex("(?i)system\\s*:")
-
-        if (assistantTagRegex.containsMatchIn(text) &&
-            (userTagRegex.containsMatchIn(text) || systemTagRegex.containsMatchIn(text))
-        ) {
-            val lastAssistant = assistantTagRegex.findAll(text).lastOrNull()
-            if (lastAssistant != null) {
-                text = text.substring(lastAssistant.range.last + 1).trim()
-            }
-        } else {
-            val leadingAssistant = assistantTagRegex.find(text)
-            if (leadingAssistant != null && leadingAssistant.range.first == 0) {
-                text = text.substring(leadingAssistant.range.last + 1).trim()
-            }
-        }
-
-        val trimmedPrompt = userPrompt.trim()
-        if (trimmedPrompt.isNotBlank() && text.startsWith(trimmedPrompt, ignoreCase = true)) {
-            text = text.removePrefix(trimmedPrompt).trimStart(':', '-', '\n', ' ')
-        }
-        return text
-    }
-
-    private fun isLikelyOnnxChatModel(modelId: String): Boolean {
-        val id = modelId.lowercase()
-        if ("gpt2" in id && "instruct" !in id) return false
-        return listOf("instruct", "chat", "assistant", "sft", "dialog", "smollm", "llama", "qwen", "phi")
-            .any { it in id }
-    }
 
     private fun autoTitleThreadIfNeeded(currentTitle: String, messages: List<ChatMessage>): String {
         if (currentTitle != "New chat") return currentTitle
